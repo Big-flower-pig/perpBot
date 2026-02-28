@@ -12,6 +12,7 @@ from datetime import datetime
 @dataclass
 class PromptContext:
     """提示词上下文"""
+
     symbol: str
     current_price: float
     price_change_24h: float
@@ -52,11 +53,16 @@ class PromptTemplates:
 5. 能够综合多维度信息做出理性判断
 
 你的决策原则：
-- 风险控制优先，宁可错过也不做错
-- 顺势而为，不逆势操作
-- 严格执行止损止盈
-- 保持冷静，不受情绪影响
-- 承认不确定性，必要时选择观望
+- 积极寻找交易机会，在技术信号明确时果断入场
+- 顺势而为，优先跟随主趋势方向
+- 严格执行止损止盈，每笔交易必须设置止损
+- 保持冷静，基于数据而非情绪做出决策
+- 当技术指标出现超买超卖反转信号时，可以逆势操作
+
+开仓信号判断标准：
+- BUY信号：价格在重要支撑位企稳、RSI超卖反弹、MACD金叉、突破均线压力
+- SELL信号：价格在重要阻力位回落、RSI超买回落、MACD死叉、跌破均线支撑
+- HOLD信号：仅在信号不明确或市场处于震荡区间时使用
 
 你必须以JSON格式返回决策结果，格式如下：
 {
@@ -89,10 +95,13 @@ class PromptTemplates:
 
 ## 分析要求
 请基于以上信息，给出你的交易决策。注意：
-1. 综合考虑技术面、情绪面和持仓情况
-2. 如果有持仓，优先考虑风险控制
-3. 如果没有明确信号，选择HOLD
-4. 给出具体的止损止盈价位
+1. 优先寻找开仓机会，技术信号明确时果断入场
+2. 综合考虑技术面、情绪面和持仓情况
+3. 如果有持仓，评估是否需要加仓或平仓
+4. 每笔交易必须设置合理的止损止盈价位
+5. 当出现以下信号时积极开仓：
+   - BUY: RSI<30超卖、MACD金叉、价格触及布林带下轨、突破均线压力
+   - SELL: RSI>70超买、MACD死叉、价格触及布林带上轨、跌破均线支撑
 
 请返回JSON格式的决策结果："""
 
@@ -186,7 +195,9 @@ class PromptTemplates:
             middle = context.bollinger_bands.get("middle", 0)
             if upper and lower:
                 # 计算价格在布林带中的位置 (0-100%)
-                bb_position = f"{((context.current_price - lower) / (upper - lower) * 100):.1f}%"
+                bb_position = (
+                    f"{((context.current_price - lower) / (upper - lower) * 100):.1f}%"
+                )
 
         return cls.TECHNICAL_INDICATORS_TEMPLATE.format(
             ma_7=context.ma_7 or "N/A",
@@ -196,9 +207,15 @@ class PromptTemplates:
             macd_dif=macd_dif,
             macd_dea=macd_dea,
             macd_histogram=macd_hist,
-            bb_upper=context.bollinger_bands.get("upper", "N/A") if context.bollinger_bands else "N/A",
-            bb_middle=context.bollinger_bands.get("middle", "N/A") if context.bollinger_bands else "N/A",
-            bb_lower=context.bollinger_bands.get("lower", "N/A") if context.bollinger_bands else "N/A",
+            bb_upper=context.bollinger_bands.get("upper", "N/A")
+            if context.bollinger_bands
+            else "N/A",
+            bb_middle=context.bollinger_bands.get("middle", "N/A")
+            if context.bollinger_bands
+            else "N/A",
+            bb_lower=context.bollinger_bands.get("lower", "N/A")
+            if context.bollinger_bands
+            else "N/A",
             bb_position=bb_position,
         )
 
@@ -222,7 +239,9 @@ class PromptTemplates:
         pnl_percent = 0
         if context.entry_price and context.unrealized_pnl and context.position_size:
             # 简化计算
-            pnl_percent = (context.unrealized_pnl / (context.entry_price * context.position_size)) * 100
+            pnl_percent = (
+                context.unrealized_pnl / (context.entry_price * context.position_size)
+            ) * 100
 
         return cls.POSITION_INFO_TEMPLATE.format(
             position_side="做多" if context.position_side == "long" else "做空",
@@ -245,7 +264,7 @@ class PromptTemplates:
         prompt = f"""## 紧急平仓评估
 
 ### 当前持仓
-- 方向: {'做多' if context.position_side == 'long' else '做空'}
+- 方向: {"做多" if context.position_side == "long" else "做空"}
 - 入场价: {context.entry_price}
 - 当前价: {context.current_price}
 - 未实现盈亏: {context.unrealized_pnl:+.2f} USDT
@@ -266,7 +285,9 @@ class PromptTemplates:
         return prompt
 
     @classmethod
-    def build_risk_alert_prompt(cls, context: PromptContext, alert_type: str, alert_message: str) -> str:
+    def build_risk_alert_prompt(
+        cls, context: PromptContext, alert_type: str, alert_message: str
+    ) -> str:
         """构建风险警报提示词
 
         Args:
@@ -283,7 +304,7 @@ class PromptTemplates:
 ### 警报详情: {alert_message}
 
 ### 当前持仓
-- 方向: {'做多' if context.position_side == 'long' else '做空'}
+- 方向: {"做多" if context.position_side == "long" else "做空"}
 - 入场价: {context.entry_price}
 - 当前价: {context.current_price}
 - 未实现盈亏: {context.unrealized_pnl:+.2f} USDT
@@ -300,7 +321,7 @@ class PromptTemplates:
 def create_prompt_context(
     symbol: str,
     market_data: Dict[str, Any],
-    indicators: Dict[str, Any],
+    indicators,
     position: Optional[Dict[str, Any]] = None,
     sentiment: Optional[Dict[str, Any]] = None,
 ) -> PromptContext:
@@ -309,7 +330,7 @@ def create_prompt_context(
     Args:
         symbol: 交易对
         market_data: 市场数据
-        indicators: 技术指标
+        indicators: 技术指标（可以是字典或 TechnicalIndicators 对象）
         position: 持仓信息
         sentiment: 市场情绪
 
@@ -317,6 +338,33 @@ def create_prompt_context(
         PromptContext 实例
     """
     has_position = position is not None and position.get("size", 0) > 0
+
+    # 处理 indicators 参数 - 支持字典和 dataclass 对象
+    if hasattr(indicators, "__dataclass_fields__"):
+        # 是 dataclass 对象，转换为字典
+        from dataclasses import asdict
+
+        indicators_dict = asdict(indicators)
+    elif hasattr(indicators, "get"):
+        # 是字典
+        indicators_dict = indicators
+    else:
+        # 其他类型，使用空字典
+        indicators_dict = {}
+
+    # 构建布林带字典
+    bollinger_bands = {
+        "upper": indicators_dict.get("bb_upper"),
+        "middle": indicators_dict.get("bb_middle"),
+        "lower": indicators_dict.get("bb_lower"),
+    }
+
+    # 构建 MACD 字典
+    macd = {
+        "dif": indicators_dict.get("macd"),
+        "dea": indicators_dict.get("macd_signal"),
+        "histogram": indicators_dict.get("macd_histogram"),
+    }
 
     return PromptContext(
         symbol=symbol,
@@ -327,12 +375,12 @@ def create_prompt_context(
         low_24h=market_data.get("low_24h", 0),
         funding_rate=market_data.get("funding_rate"),
         open_interest=market_data.get("open_interest"),
-        ma_7=indicators.get("ma_7"),
-        ma_25=indicators.get("ma_25"),
-        ma_99=indicators.get("ma_99"),
-        rsi=indicators.get("rsi"),
-        macd=indicators.get("macd"),
-        bollinger_bands=indicators.get("bollinger_bands"),
+        ma_7=indicators_dict.get("sma_5"),  # 使用 sma_5 作为 ma_7
+        ma_25=indicators_dict.get("sma_20"),  # 使用 sma_20 作为 ma_25
+        ma_99=indicators_dict.get("sma_50"),  # 使用 sma_50 作为 ma_99
+        rsi=indicators_dict.get("rsi"),
+        macd=macd,
+        bollinger_bands=bollinger_bands,
         has_position=has_position,
         position_side=position.get("side") if has_position else None,
         position_size=position.get("size") if has_position else None,

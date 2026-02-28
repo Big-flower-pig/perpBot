@@ -24,6 +24,7 @@ from utils.helpers import safe_float
 
 class Signal(Enum):
     """交易信号"""
+
     BUY = "BUY"
     SELL = "SELL"
     HOLD = "HOLD"
@@ -32,6 +33,7 @@ class Signal(Enum):
 
 class Confidence(Enum):
     """信心程度"""
+
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
     LOW = "LOW"
@@ -39,6 +41,7 @@ class Confidence(Enum):
 
 class Trend(Enum):
     """趋势方向"""
+
     STRONG_UP = "强势上涨"
     STRONG_DOWN = "强势下跌"
     WEAK_UP = "弱势上涨"
@@ -49,6 +52,7 @@ class Trend(Enum):
 @dataclass
 class TechnicalIndicators:
     """技术指标数据"""
+
     # 移动平均线
     sma_5: float = 0
     sma_20: float = 0
@@ -85,6 +89,7 @@ class TechnicalIndicators:
 @dataclass
 class TrendAnalysis:
     """趋势分析结果"""
+
     short_term: str = "未知"  # 短期趋势
     medium_term: str = "未知"  # 中期趋势
     overall: Trend = Trend.SIDEWAYS
@@ -96,6 +101,7 @@ class TrendAnalysis:
 @dataclass
 class SignalResult:
     """信号结果"""
+
     signal: Signal
     reason: str
     confidence: Confidence
@@ -123,17 +129,23 @@ class StrategyEngine:
         self._logger = get_logger("strategy")
         self._signal_history: List[SignalResult] = []
 
-    def calculate_indicators(self, df: pd.DataFrame) -> TechnicalIndicators:
+    def calculate_indicators(self, kline_data) -> TechnicalIndicators:
         """计算技术指标
 
         Args:
-            df: K线数据 DataFrame
+            kline_data: K线数据，可以是 DataFrame 或 List[Dict]
 
         Returns:
             TechnicalIndicators 对象
         """
         try:
             indicators = TechnicalIndicators()
+
+            # 转换为 DataFrame
+            if isinstance(kline_data, list):
+                df = pd.DataFrame(kline_data)
+            else:
+                df = kline_data
 
             # 移动平均线
             df["sma_5"] = df["close"].rolling(window=5, min_periods=1).mean()
@@ -183,7 +195,9 @@ class StrategyEngine:
             current_price = safe_float(df["close"].iloc[-1])
             bb_range = indicators.bb_upper - indicators.bb_lower
             if bb_range > 0:
-                indicators.bb_position = (current_price - indicators.bb_lower) / bb_range
+                indicators.bb_position = (
+                    current_price - indicators.bb_lower
+                ) / bb_range
             else:
                 indicators.bb_position = 0.5
 
@@ -212,13 +226,13 @@ class StrategyEngine:
 
     def analyze_trend(
         self,
-        df: pd.DataFrame,
+        kline_data,
         indicators: TechnicalIndicators,
     ) -> TrendAnalysis:
         """分析趋势
 
         Args:
-            df: K线数据
+            kline_data: K线数据，可以是 DataFrame 或 List[Dict]
             indicators: 技术指标
 
         Returns:
@@ -226,6 +240,13 @@ class StrategyEngine:
         """
         try:
             analysis = TrendAnalysis()
+
+            # 转换为 DataFrame
+            if isinstance(kline_data, list):
+                df = pd.DataFrame(kline_data)
+            else:
+                df = kline_data
+
             current_price = safe_float(df["close"].iloc[-1])
 
             # 短期趋势（基于MA20）
@@ -503,5 +524,7 @@ class StrategyEngine:
             "buy_count": signals.count("BUY"),
             "sell_count": signals.count("SELL"),
             "hold_count": signals.count("HOLD"),
-            "last_signal": self._signal_history[-1].signal.value if self._signal_history else None,
+            "last_signal": self._signal_history[-1].signal.value
+            if self._signal_history
+            else None,
         }

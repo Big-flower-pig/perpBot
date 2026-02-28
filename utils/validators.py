@@ -285,15 +285,20 @@ def validate_size(
     return True, ""
 
 
-def validate_config(config: Dict[str, Any]) -> ValidationResult:
+def validate_config(config: Dict[str, Any] = None) -> ValidationResult:
     """验证完整配置
 
     Args:
-        config: 配置字典
+        config: 配置字典，如果为 None 则使用全局配置
 
     Returns:
         验证结果
     """
+    if config is None:
+        from utils.config import get_config
+
+        config = get_config()
+
     result = ValidationResult()
 
     # 验证交易所配置
@@ -340,13 +345,19 @@ def validate_config(config: Dict[str, Any]) -> ValidationResult:
     if "risk" in config:
         risk = config["risk"]
         valid, msg = validate_positive_number(
-            risk.get("stop_loss_percent"), "risk.stop_loss_percent", min_value=0.1, max_value=50
+            risk.get("stop_loss_percent"),
+            "risk.stop_loss_percent",
+            min_value=0.1,
+            max_value=50,
         )
         if not valid:
             result.add_error(msg)
 
         valid, msg = validate_positive_number(
-            risk.get("take_profit_percent"), "risk.take_profit_percent", min_value=0.1, max_value=100
+            risk.get("take_profit_percent"),
+            "risk.take_profit_percent",
+            min_value=0.1,
+            max_value=100,
         )
         if not valid:
             result.add_error(msg)
@@ -485,7 +496,9 @@ def sanitize_string(value: str, max_length: int = 1000) -> str:
     return value.strip()
 
 
-def validate_and_sanitize(data: Dict[str, Any], schema: Dict[str, Any]) -> Tuple[Dict, List[str]]:
+def validate_and_sanitize(
+    data: Dict[str, Any], schema: Dict[str, Any]
+) -> Tuple[Dict, List[str]]:
     """验证并清理数据
 
     Args:

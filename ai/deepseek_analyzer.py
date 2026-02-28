@@ -22,6 +22,7 @@ from ai.prompt_templates import PromptTemplates, PromptContext, create_prompt_co
 
 class Decision(Enum):
     """交易决策枚举"""
+
     BUY = "BUY"
     SELL = "SELL"
     HOLD = "HOLD"
@@ -30,6 +31,7 @@ class Decision(Enum):
 
 class Confidence(Enum):
     """信心程度枚举"""
+
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
     LOW = "LOW"
@@ -38,6 +40,7 @@ class Confidence(Enum):
 @dataclass
 class AIDecision:
     """AI 决策结果"""
+
     decision: Decision
     confidence: Confidence
     reason: str
@@ -80,10 +83,10 @@ class DeepSeekAnalyzer:
 
     def __init__(self):
         self._logger = get_logger("ai")
-        self._api_key = get_config("ai.deepseek.api_key")
-        self._model = get_config("ai.deepseek.model", "deepseek-chat")
-        self._temperature = get_config("ai.deepseek.temperature", 0.3)
-        self._max_tokens = get_config("ai.deepseek.max_tokens", 500)
+        self._api_key = get_config("ai.api_key")
+        self._model = get_config("ai.model", "deepseek-chat")
+        self._temperature = get_config("ai.temperature", 0.3)
+        self._max_tokens = get_config("ai.max_tokens", 500)
 
         # 请求统计
         self._request_count = 0
@@ -94,7 +97,7 @@ class DeepSeekAnalyzer:
         self._decision_history: List[AIDecision] = []
         self._max_history = 100
 
-    @retry_on_failure(max_retries=3, delay=1.0, backoff=2.0)
+    @retry_on_failure(max_retries=3, delay=1.0, exponential_backoff=True)
     @rate_limit(calls_per_minute=20)
     def analyze(
         self,
@@ -139,9 +142,9 @@ class DeepSeekAnalyzer:
         # 记录历史
         self._add_to_history(decision)
 
-        # 记录日志
-        self._logger.ai_decision(
-            f"AI决策: {decision.decision.value} "
+        # 记录日志 - 使用 info 方法记录 AI 决策
+        self._logger.info(
+            f"[AI] DeepSeek 决策: {decision.decision.value} "
             f"(信心: {decision.confidence.value}, "
             f"风险: {decision.risk_level}, "
             f"耗时: {response_time}ms)"
@@ -224,7 +227,9 @@ class DeepSeekAnalyzer:
             unrealized_pnl=position.get("unrealized_pnl"),
         )
 
-        prompt = PromptTemplates.build_risk_alert_prompt(context, alert_type, alert_message)
+        prompt = PromptTemplates.build_risk_alert_prompt(
+            context, alert_type, alert_message
+        )
 
         response_text, response_time = self._call_api(prompt)
         decision = self._parse_response(response_text)
@@ -306,7 +311,11 @@ class DeepSeekAnalyzer:
 
             # 解析决策
             decision_str = data.get("decision", "HOLD").upper()
-            decision = Decision(decision_str) if decision_str in [d.value for d in Decision] else Decision.HOLD
+            decision = (
+                Decision(decision_str)
+                if decision_str in [d.value for d in Decision]
+                else Decision.HOLD
+            )
 
             # 解析信心
             confidence_str = data.get("confidence", "MEDIUM").upper()
@@ -327,7 +336,9 @@ class DeepSeekAnalyzer:
             )
 
         except (json.JSONDecodeError, ValueError) as e:
-            self._logger.warning(f"解析 AI 响应失败: {e}, 原始响应: {response_text[:200]}")
+            self._logger.warning(
+                f"解析 AI 响应失败: {e}, 原始响应: {response_text[:200]}"
+            )
 
             # 返回默认的 HOLD 决策
             return AIDecision(
@@ -370,13 +381,17 @@ class DeepSeekAnalyzer:
         with self._lock:
             self._decision_history.append(decision)
             if len(self._decision_history) > self._max_history:
-                self._decision_history = self._decision_history[-self._max_history // 2 :]
+                self._decision_history = self._decision_history[
+                    -self._max_history // 2 :
+                ]
 
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
         with self._lock:
             avg_response_time = (
-                self._total_response_time / self._request_count if self._request_count > 0 else 0
+                self._total_response_time / self._request_count
+                if self._request_count > 0
+                else 0
             )
 
             # 统计决策分布

@@ -24,6 +24,7 @@ from utils.helpers import safe_float, calculate_pnl, calculate_liquidation_price
 
 class RiskLevel(Enum):
     """风险等级"""
+
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
@@ -32,8 +33,9 @@ class RiskLevel(Enum):
 
 class RiskAction(Enum):
     """风险动作"""
+
     ALLOW = "ALLOW"  # 允许交易
-    WARN = "WARN"    # 警告但允许
+    WARN = "WARN"  # 警告但允许
     REDUCE = "REDUCE"  # 减少仓位
     BLOCK = "BLOCK"  # 阻止交易
 
@@ -41,6 +43,7 @@ class RiskAction(Enum):
 @dataclass
 class RiskAssessment:
     """风险评估结果"""
+
     action: RiskAction
     level: RiskLevel
     reason: str
@@ -52,6 +55,7 @@ class RiskAssessment:
 @dataclass
 class DailyStats:
     """日内统计"""
+
     date: date
     trades: int = 0
     pnl: float = 0.0
@@ -327,22 +331,33 @@ class RiskManager:
 
     def check_position_risk(
         self,
-        position: Dict,
+        position,  # 支持 Dict 或 Position dataclass
         current_price: float,
     ) -> RiskAssessment:
         """检查持仓风险
 
         Args:
-            position: 持仓信息
+            position: 持仓信息（字典或 Position dataclass）
             current_price: 当前价格
 
         Returns:
             RiskAssessment 对象
         """
-        entry_price = position.get("entry_price", 0)
-        side = position.get("side", "long")
-        unrealized_pnl = position.get("unrealized_pnl", 0)
-        size = position.get("size", 0)
+        # 支持 dataclass 和字典两种类型
+        if hasattr(position, "entry_price"):
+            # Position dataclass
+            entry_price = position.entry_price
+            side = position.side
+            unrealized_pnl = position.unrealized_pnl
+            size = position.size
+            leverage = getattr(position, "leverage", 10)
+        else:
+            # Dict
+            entry_price = position.get("entry_price", 0)
+            side = position.get("side", "long")
+            unrealized_pnl = position.get("unrealized_pnl", 0)
+            size = position.get("size", 0)
+            leverage = position.get("leverage", 10)
 
         if entry_price <= 0:
             return RiskAssessment(
@@ -389,8 +404,7 @@ class RiskManager:
             level = RiskLevel.CRITICAL
             warnings.append(f"触发最大回撤限制: {abs(pnl_pct):.2f}%")
 
-        # 检查强平风险
-        leverage = position.get("leverage", 10)
+        # 检查强平风险（leverage 已在上面提取）
         liquidation_price = calculate_liquidation_price(entry_price, leverage, side)
         price_distance = abs(current_price - liquidation_price) / current_price * 100
 
@@ -494,14 +508,19 @@ class RiskManager:
         avg_loss = sum(losses) / len(losses) if losses else 0
 
         win_rate = len(wins) / total_trades * 100 if total_trades > 0 else 0
-        profit_factor = abs(sum(wins) / sum(losses)) if losses and sum(losses) != 0 else float("inf")
+        profit_factor = (
+            abs(sum(wins) / sum(losses))
+            if losses and sum(losses) != 0
+            else float("inf")
+        )
 
         # 计算夏普比率
         if len(pnls) > 1:
             import statistics
+
             avg_pnl = statistics.mean(pnls)
             std_pnl = statistics.stdev(pnls)
-            sharpe = (avg_pnl / std_pnl * (252 ** 0.5)) if std_pnl > 0 else 0
+            sharpe = (avg_pnl / std_pnl * (252**0.5)) if std_pnl > 0 else 0
         else:
             sharpe = 0
 
@@ -521,3 +540,15 @@ class RiskManager:
         """重置日内统计"""
         today = date.today()
         self._daily_stats[today] = DailyStats(date=today)
+
+
+# Global risk manager instance
+_risk_manager: Optional[RiskManager] = None
+
+
+def get_risk_manager() -> RiskManager:
+    """Get global risk manager instance"""
+    global _risk_manager
+    if _risk_manager is None:
+        _risk_manager = RiskManager()
+    return _risk_manager

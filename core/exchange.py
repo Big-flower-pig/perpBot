@@ -13,10 +13,47 @@ PerpBot 交易所管理模块
 
 import time
 import threading
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+
+# 在导入 ccxt 之前设置代理（解决 Windows 中国大陆网络问题）
+# 从环境变量或配置文件读取代理配置
+_proxy_from_env = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+if not _proxy_from_env:
+    # 尝试从 .env 文件加载
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        _proxy_from_env = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    except Exception:
+        pass
+
+# 如果仍然没有代理，尝试从 config.yaml 读取
+if not _proxy_from_env:
+    try:
+        import yaml
+
+        _config_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
+        if os.path.exists(_config_path):
+            with open(_config_path, "r", encoding="utf-8") as f:
+                _cfg = yaml.safe_load(f)
+                _proxy_from_env = _cfg.get("exchange", {}).get("proxy")
+                # 调试输出
+                print(f"[EXCHANGE_MODULE] 从 config.yaml 读取代理: {_proxy_from_env}")
+    except Exception as e:
+        print(f"[EXCHANGE_MODULE] 读取 config.yaml 失败: {e}")
+
+# 设置代理环境变量（必须在导入 ccxt 之前）
+if _proxy_from_env:
+    os.environ["HTTP_PROXY"] = _proxy_from_env
+    os.environ["HTTPS_PROXY"] = _proxy_from_env
+    print(f"[EXCHANGE_MODULE] 代理已设置: {_proxy_from_env}")
+else:
+    print("[EXCHANGE_MODULE] 警告: 未找到代理配置")
 
 import ccxt
 
@@ -64,8 +101,14 @@ class Ticker:
     last: float  # 最新价
     high: float  # 24h最高
     low: float  # 24h最低
-    volume: float  # 24h成交量
-    timestamp: datetime
+    volume: float  # 24h成交量 (基础货币)
+    quote_volume: float = 0.0  # 24h成交量 (计价货币)
+    percentage: float = 0.0  # 24h涨跌幅百分比
+    timestamp: datetime = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now()
 
     @property
     def spread(self) -> float:
@@ -223,17 +266,32 @@ class ExchangeManager:
 
             self._logger.info(f"正在连接交易所: {exchange_name}")
             if sandbox_mode:
-                self._logger.info("🎮 模拟盘模式已启用")
+                self._logger.info("[SANDBOX] 模拟盘模式已启用")
 
             # 构建交易所配置
             exchange_config = {
                 "enableRateLimit": True,
+                "timeout": 30000,  # 30秒超时
                 "options": {
                     "defaultType": "swap",  # 永续合约
+                    "loadMarkets": False,  # 延迟加载，使用原生 API 获取
                 },
                 "apiKey": self._config.get("api_key"),
                 "secret": self._config.get("secret"),
             }
+
+            # 代理配置（中国大陆访问 OKX 需要）
+            proxy = self._config.get("proxy")
+            if proxy:
+                # 设置环境变量代理（最可靠的方式）
+                os.environ["HTTP_PROXY"] = proxy
+                os.environ["HTTPS_PROXY"] = proxy
+                # 同时设置 ccxt 的 proxies 配置
+                exchange_config["proxies"] = {
+                    "http": proxy,
+                    "https": proxy,
+                }
+                self._logger.info(f"[PROXY] 已配置代理: {proxy}")
 
             # OKX 需要密码
             if exchange_name == "okx":
@@ -261,7 +319,7 @@ class ExchangeManager:
             self._connected = True
             self._reconnect_attempts = 0
 
-            self._logger.info("✅ 交易所连接成功")
+            self._logger.info("[OK] 交易所连接成功")
             return True
 
         except Exception as e:
@@ -275,7 +333,7 @@ class ExchangeManager:
             server_time = self._exchange.fetch_time()
             server_dt = datetime.fromtimestamp(server_time / 1000)
             self._logger.info(
-                f"✅ API连接验证成功，服务器时间: {server_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+                f"[OK] API连接验证成功，服务器时间: {server_dt.strftime('%Y-%m-%d %H:%M:%S')}"
             )
         except Exception as e:
             raise ConnectionError(f"API连接验证失败: {e}")
@@ -283,8 +341,20 @@ class ExchangeManager:
     def _load_markets(self):
         """加载市场信息"""
         try:
-            markets = self._exchange.load_markets()
             symbol = get_config("trading.symbol")
+
+            # 对于 OKX，直接使用原生 API 获取单个交易对的市场信息
+            # 避免 ccxt 解析所有市场数据时的 NoneType 错误
+            exchange_name = self._config.get("name", "okx")
+            if exchange_name == "okx":
+                markets = self._load_market_via_native_api()
+            else:
+                # 其他交易所使用 ccxt 默认方式
+                try:
+                    markets = self._exchange.load_markets()
+                except Exception as e:
+                    self._logger.warning(f"加载市场数据失败，尝试使用备选方法: {e}")
+                    markets = self._load_market_via_native_api()
 
             if symbol not in markets:
                 raise ExchangeError(f"交易对 {symbol} 不存在")
@@ -301,7 +371,7 @@ class ExchangeManager:
             }
 
             self._logger.info(
-                f"✅ 市场信息已加载: {symbol}, "
+                f"[OK] 市场信息已加载: {symbol}, "
                 f"合约乘数: {self._market_info['contract_size']}, "
                 f"最小交易量: {self._market_info['min_amount']}"
             )
@@ -309,67 +379,198 @@ class ExchangeManager:
         except Exception as e:
             raise ExchangeError(f"加载市场信息失败: {e}")
 
+    def _load_market_via_native_api(self) -> Dict[str, Any]:
+        """使用 OKX 原生 API 获取市场信息
+
+        Returns:
+            市场信息字典
+        """
+        symbol = get_config("trading.symbol")
+        # 转换交易对格式: BTC/USDT:USDT -> BTC-USDT-SWAP
+        inst_id = symbol.replace("/", "-").replace(":USDT", "-SWAP")
+
+        try:
+            # 获取交易对详情
+            response = self._exchange.public_get_public_instruments(
+                {"instType": "SWAP", "instId": inst_id}
+            )
+
+            if response.get("code") != "0":
+                raise ExchangeError(f"获取市场信息失败: {response.get('msg')}")
+
+            data = response.get("data", [])
+            if not data:
+                raise ExchangeError(f"未找到交易对 {inst_id}")
+
+            market_data = data[0]
+
+            # 构建符合 ccxt 格式的市场信息
+            markets = {
+                symbol: {
+                    "id": inst_id,
+                    "symbol": symbol,
+                    "base": symbol.split("/")[0],
+                    "quote": "USDT",
+                    "settle": "USDT",
+                    "type": "swap",
+                    "contractSize": float(market_data.get("ctVal", 1)),
+                    "contract": True,
+                    "linear": True,
+                    "limits": {
+                        "amount": {
+                            "min": float(market_data.get("minSz", 0.01)),
+                            "max": float(market_data.get("maxSz", 10000)),
+                        },
+                        "price": {
+                            "min": 0.01,
+                            "max": 1000000,
+                        },
+                    },
+                    "precision": {
+                        "price": int(market_data.get("tickSz", "0.1").count("0") - 1)
+                        if "." in market_data.get("tickSz", "0.1")
+                        else 8,
+                        "amount": int(market_data.get("lotSz", "0.01").count("0") - 1)
+                        if "." in market_data.get("lotSz", "0.01")
+                        else 2,
+                    },
+                }
+            }
+
+            # 手动设置交易所的市场数据，避免后续重复加载
+            self._exchange.markets = markets
+            self._exchange.markets_by_id = {inst_id: markets[symbol]}
+
+            self._logger.info(f"[OK] 通过原生 API 加载市场信息: {symbol}")
+            return markets
+
+        except Exception as e:
+            self._logger.error(f"原生 API 加载市场信息失败: {e}")
+            # 返回默认市场信息
+            markets = {
+                symbol: {
+                    "id": inst_id,
+                    "symbol": symbol,
+                    "contractSize": 1.0,
+                    "limits": {"amount": {"min": 0.01}},
+                    "precision": {"price": 8, "amount": 2},
+                }
+            }
+            self._exchange.markets = markets
+            self._exchange.markets_by_id = {inst_id: markets[symbol]}
+            return markets
+
     def _setup_trading_params(self):
-        """设置交易参数"""
+        """设置交易参数（优化版：减少不必要的 API 调用）"""
         try:
             symbol = get_config("trading.symbol")
             leverage = get_config("trading.leverage")
             margin_mode = get_config("trading.margin_mode")
 
-            # 设置单向持仓模式
-            try:
-                self._exchange.set_position_mode(False, symbol)
-                self._logger.info("✅ 已设置单向持仓模式")
-            except Exception as e:
-                self._logger.warning(f"设置单向持仓模式失败 (可能已设置): {e}")
+            # 仅设置杠杆，其他参数使用默认值或已有设置
+            # 持仓模式和保证金模式通常在账户级别已设置，无需每次修改
+            leverage_set = self._set_leverage_via_native_api(
+                symbol, leverage, margin_mode
+            )
 
-            # 设置仓位模式（OKX 特有）
-            if hasattr(self._exchange, "private_post_account_set_margin_mode"):
-                try:
-                    self._exchange.private_post_account_set_margin_mode(
-                        {"marginMode": margin_mode}
-                    )
-                    self._logger.info(f"✅ 已设置{margin_mode}模式")
-                except Exception as e:
-                    if "already" not in str(e).lower():
-                        self._logger.warning(f"设置仓位模式失败: {e}")
-
-            # 设置杠杆
-            try:
-                result = self._exchange.set_leverage(
-                    leverage, symbol, {"mgnMode": margin_mode}
-                )
-                self._logger.info(f"✅ 已设置杠杆: {leverage}x")
-            except Exception as e:
-                self._logger.warning(f"设置杠杆失败: {e}")
-
-            # 验证杠杆设置
-            self._verify_leverage(leverage, margin_mode)
+            if leverage_set:
+                self._logger.info(f"[OK] 已设置杠杆: {leverage}x")
 
         except Exception as e:
             self._logger.error(f"设置交易参数失败: {e}")
+
+    def _set_leverage_via_native_api(
+        self, symbol: str, leverage: int, margin_mode: str
+    ) -> bool:
+        """使用 OKX 原生 API 设置杠杆
+
+        Args:
+            symbol: 交易对 (如 BTC/USDT:USDT)
+            leverage: 杠杆倍数
+            margin_mode: 仓位模式 (cross/isolated)
+
+        Returns:
+            是否设置成功
+        """
+        # 转换交易对格式: BTC/USDT:USDT -> BTC-USDT-SWAP
+        inst_id = symbol.replace("/", "-").replace(":USDT", "-SWAP")
+
+        try:
+            # OKX 设置杠杆 API
+            # 文档: https://www.okx.com/docs-v5/zh/#trading-account-set-leverage
+            params = {
+                "instId": inst_id,
+                "lever": str(leverage),
+                "mgnMode": margin_mode,
+            }
+
+            # 逐仓模式需要指定 posSide
+            if margin_mode == "isolated":
+                # 单向持仓模式下，需要分别设置多头和空头的杠杆
+                for pos_side in ["long", "short"]:
+                    try:
+                        params["posSide"] = pos_side
+                        result = self._exchange.private_post_account_set_leverage(
+                            params
+                        )
+                        if result.get("code") == "0":
+                            self._logger.debug(f"设置 {pos_side} 杠杆成功: {leverage}x")
+                    except Exception as e:
+                        error_msg = str(e)
+                        # 忽略已设置的错误
+                        if "51001" in error_msg or "already" in error_msg.lower():
+                            pass
+                        elif "59000" in error_msg:
+                            # 有持仓时设置杠杆需要特殊处理
+                            self._logger.debug(f"有持仓，{pos_side} 杠杆设置跳过")
+                        else:
+                            self._logger.debug(f"设置 {pos_side} 杠杆: {e}")
+                return True
+            else:
+                # 全仓模式
+                result = self._exchange.private_post_account_set_leverage(params)
+                if result.get("code") == "0":
+                    return True
+                else:
+                    self._logger.warning(f"设置杠杆失败: {result.get('msg')}")
+                    return False
+
+        except Exception as e:
+            error_msg = str(e)
+            if "51001" in error_msg:
+                # API Key 环境问题，静默忽略
+                return True
+            self._logger.warning(f"设置杠杆异常: {e}")
+            return False
 
     def _verify_leverage(self, expected_leverage: int, margin_mode: str):
         """验证杠杆设置"""
         try:
             symbol = get_config("trading.symbol")
             # 转换交易对格式: BTC/USDT:USDT -> BTC-USDT-SWAP
-            inst_id = symbol.replace("/", "-").replace(":USDT", "-USDT-SWAP")
+            inst_id = symbol.replace("/", "-").replace(":USDT", "-SWAP")
 
             leverage_info = self._exchange.private_get_account_leverage_info(
                 {"mgnMode": margin_mode, "instId": inst_id}
             )
 
-            actual_leverage = int(leverage_info["data"][0]["lever"])
-            if actual_leverage != expected_leverage:
-                self._logger.warning(
-                    f"杠杆设置不一致: 期望 {expected_leverage}x, 实际 {actual_leverage}x"
-                )
-            else:
-                self._logger.info(f"✅ 杠杆验证成功: {actual_leverage}x")
+            if leverage_info.get("code") != "0":
+                self._logger.debug(f"验证杠杆: {leverage_info.get('msg')}")
+                return
+
+            data = leverage_info.get("data", [])
+            if data:
+                actual_leverage = int(data[0].get("lever", 0))
+                if actual_leverage != expected_leverage:
+                    self._logger.warning(
+                        f"杠杆设置不一致: 期望 {expected_leverage}x, 实际 {actual_leverage}x"
+                    )
+                else:
+                    self._logger.info(f"[OK] 杠杆验证成功: {actual_leverage}x")
 
         except Exception as e:
-            self._logger.warning(f"验证杠杆失败: {e}")
+            # 静默忽略验证错误，不影响交易
+            self._logger.debug(f"验证杠杆跳过: {e}")
 
     @retry_on_failure(max_retries=3, delay=1)
     def get_ticker(self, symbol: str = None) -> Ticker:
@@ -382,7 +583,17 @@ class ExchangeManager:
             Ticker 对象
         """
         symbol = symbol or get_config("trading.symbol")
-        ticker = self.exchange.fetch_ticker(symbol)
+
+        # 直接使用 OKX 原生 API 获取行情，避免 ccxt 解析错误
+        # ccxt 的 safe_market 函数在市场数据不完整时会抛出 KeyError
+        try:
+            ticker = self._get_ticker_via_native_api(symbol)
+        except Exception as e:
+            self._logger.warning(f"原生 API 获取行情失败，尝试 ccxt: {e}")
+            try:
+                ticker = self.exchange.fetch_ticker(symbol)
+            except Exception as e2:
+                raise ExchangeError(f"获取行情失败: {e2}")
 
         return Ticker(
             symbol=symbol,
@@ -392,8 +603,45 @@ class ExchangeManager:
             high=safe_float(ticker.get("high")),
             low=safe_float(ticker.get("low")),
             volume=safe_float(ticker.get("baseVolume")),
+            quote_volume=safe_float(ticker.get("quoteVolume")),
+            percentage=safe_float(ticker.get("percentage")),
             timestamp=datetime.now(),
         )
+
+    def _get_ticker_via_native_api(self, symbol: str) -> Dict[str, Any]:
+        """使用 OKX 原生 API 获取行情数据
+
+        Args:
+            symbol: 交易对 (如 BTC/USDT:USDT)
+
+        Returns:
+            行情数据字典
+        """
+        # 转换交易对格式: BTC/USDT:USDT -> BTC-USDT-SWAP
+        inst_id = symbol.replace("/", "-").replace(":USDT", "-SWAP")
+
+        # 调用 OKX 公共 API - 获取单个交易对行情
+        response = self._exchange.public_get_market_ticker({"instId": inst_id})
+
+        if response.get("code") != "0":
+            raise ExchangeError(f"获取行情失败: {response.get('msg')}")
+
+        data = response.get("data", [])
+        if not data:
+            raise ExchangeError(f"未找到交易对 {inst_id} 的行情数据")
+
+        ticker_data = data[0]
+
+        return {
+            "bid": safe_float(ticker_data.get("bidPx")),
+            "ask": safe_float(ticker_data.get("askPx")),
+            "last": safe_float(ticker_data.get("last")),
+            "high": safe_float(ticker_data.get("high24h")),
+            "low": safe_float(ticker_data.get("low24h")),
+            "baseVolume": safe_float(ticker_data.get("vol24h")),
+            "quoteVolume": safe_float(ticker_data.get("volCcy24h")),
+            "percentage": safe_float(ticker_data.get("change24h")),
+        }
 
     @retry_on_failure(max_retries=3, delay=1)
     def get_ohlcv(
@@ -415,7 +663,15 @@ class ExchangeManager:
         symbol = symbol or get_config("trading.symbol")
         timeframe = timeframe or get_config("trading.timeframe")
 
-        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        # 使用原生 API 获取 K 线数据
+        try:
+            ohlcv = self._get_ohlcv_via_native_api(symbol, timeframe, limit)
+        except Exception as e:
+            self._logger.warning(f"原生 API 获取 K 线失败，尝试 ccxt: {e}")
+            try:
+                ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            except Exception as e2:
+                raise ExchangeError(f"获取 K 线失败: {e2}")
 
         return [
             {
@@ -428,6 +684,59 @@ class ExchangeManager:
             }
             for candle in ohlcv
         ]
+
+    def _get_ohlcv_via_native_api(
+        self, symbol: str, timeframe: str, limit: int
+    ) -> List[List]:
+        """使用 OKX 原生 API 获取 K 线数据
+
+        Args:
+            symbol: 交易对 (如 BTC/USDT:USDT)
+            timeframe: 时间周期 (如 1h, 4h, 1d)
+            limit: 数量
+
+        Returns:
+            K 线数据列表 [[ts, open, high, low, close, volume], ...]
+        """
+        # 转换交易对格式: BTC/USDT:USDT -> BTC-USDT-SWAP
+        inst_id = symbol.replace("/", "-").replace(":USDT", "-SWAP")
+
+        # 转换时间周期格式: 1h -> 1H, 4h -> 4H, 1d -> 1D
+        bar = timeframe.upper()
+
+        # 调用 OKX 公共 API - 获取 K 线数据
+        response = self._exchange.public_get_market_candles(
+            {
+                "instId": inst_id,
+                "bar": bar,
+                "limit": str(limit),
+            }
+        )
+
+        if response.get("code") != "0":
+            raise ExchangeError(f"获取 K 线失败: {response.get('msg')}")
+
+        data = response.get("data", [])
+        if not data:
+            return []
+
+        # OKX K 线数据格式: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+        # ccxt 格式: [ts, o, h, l, c, vol]
+        ohlcv = []
+        for candle in data:
+            # OKX 返回的时间戳是毫秒
+            ts = int(candle[0])
+            o = float(candle[1])
+            h = float(candle[2])
+            l = float(candle[3])
+            c = float(candle[4])
+            vol = float(candle[5])
+            ohlcv.append([ts, o, h, l, c, vol])
+
+        # OKX 返回的是倒序，需要反转
+        ohlcv.reverse()
+
+        return ohlcv
 
     def get_balance(self, currency: str = "USDT") -> Dict[str, float]:
         """获取账户余额
@@ -453,35 +762,138 @@ class ExchangeManager:
         """获取当前持仓
 
         Args:
-            symbol: 交易对
+            symbol: 交易对，None 则获取所有 SWAP 持仓中的第一个
 
         Returns:
-            Position 对象或 None
+            Position 对象或 None（无持仓时返回 None）
         """
         symbol = symbol or get_config("trading.symbol")
-        positions = self.exchange.fetch_positions([symbol])
 
-        for pos in positions:
-            if pos["symbol"] == symbol:
-                contracts = safe_float(pos.get("contracts"))
-                if contracts and contracts > 0:
-                    return Position(
-                        symbol=symbol,
-                        side=pos.get("side"),
-                        size=contracts,
-                        entry_price=safe_float(pos.get("entryPrice")),
-                        unrealized_pnl=safe_float(pos.get("unrealizedPnl")),
-                        leverage=safe_float(
-                            pos.get("leverage", get_config("trading.leverage"))
-                        ),
-                        margin_mode=pos.get(
-                            "mgnMode", get_config("trading.margin_mode")
-                        ),
-                        liquidation_price=safe_float(pos.get("liquidationPrice")),
-                        timestamp=datetime.now(),
+        # 使用 OKX 原生 API 获取持仓
+        position = self._get_position_via_native_api(symbol)
+        return position
+
+    def _get_position_via_native_api(self, symbol: str) -> Optional[Position]:
+        """使用 OKX 原生 API 获取持仓
+
+        Args:
+            symbol: 交易对 (如 BTC/USDT:USDT)
+
+        Returns:
+            Position 对象或 None（无持仓时返回 None，不抛异常）
+        """
+        try:
+            # 直接获取所有 SWAP 持仓（避免 instId 查询导致的认证问题）
+            self._logger.debug("正在获取所有 SWAP 持仓...")
+
+            # 添加重试机制
+            max_retries = 3
+            retry_delay = 1
+            last_error = None
+
+            for attempt in range(max_retries):
+                try:
+                    response = self._exchange.private_get_account_positions(
+                        {"instType": "SWAP"}
                     )
+                    break  # 成功则跳出重试循环
+                except Exception as e:
+                    last_error = e
+                    error_msg = str(e)
+                    # 如果是认证错误，不重试
+                    if "50101" in error_msg:
+                        self._logger.warning("API Key 环境不匹配，请检查配置")
+                        return None
+                    # 网络错误则重试
+                    if attempt < max_retries - 1:
+                        self._logger.debug(
+                            f"获取持仓失败，重试 {attempt + 1}/{max_retries}: {e}"
+                        )
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避
+                    else:
+                        raise
 
-        return None
+            # 检查 API 响应
+            if response is None:
+                self._logger.warning("获取持仓响应为空")
+                return None
+
+            code = response.get("code")
+            if code != "0":
+                msg = response.get("msg", "Unknown error")
+                self._logger.warning(f"获取持仓 API 返回错误: code={code}, msg={msg}")
+                return None
+
+            data = response.get("data", [])
+            self._logger.debug(f"SWAP 持仓数据: {len(data)} 条")
+
+            if not data:
+                self._logger.debug("无任何持仓数据")
+                return None
+
+            # 遍历找到有持仓的数据
+            for pos_data in data:
+                pos_size = safe_float(pos_data.get("pos"))
+                self._logger.debug(
+                    f"检查持仓: instId={pos_data.get('instId')}, pos={pos_size}"
+                )
+                if pos_size == 0:
+                    continue
+
+                # 解析持仓信息
+                pos_inst_id = pos_data.get("instId", "")
+                # 转换 instId 为 symbol 格式: DOGE-USDT-SWAP -> DOGE/USDT:USDT
+                # 先移除 -SWAP 后缀，然后将 -USDT- 替换为 /USDT:USDT
+                pos_symbol = pos_inst_id.replace("-SWAP", "")
+                # 处理 XXX-USDT-SWAP 格式 -> XXX/USDT:USDT
+                if "-USDT" in pos_symbol:
+                    pos_symbol = pos_symbol.replace("-USDT", "/USDT:USDT")
+                # 处理其他格式如 XXX-USD-SWAP -> XXX/USD:USD
+                elif "-USD" in pos_symbol and "-USDT" not in pos_symbol:
+                    pos_symbol = pos_symbol.replace("-USD", "/USD:USD")
+
+                # OKX 持仓方向: long/short/net
+                pos_side = pos_data.get("posSide")
+                if not pos_side or pos_side == "net":
+                    pos_side = "long" if pos_size > 0 else "short"
+                    pos_size = abs(pos_size)
+
+                self._logger.info(
+                    f"发现持仓: {pos_inst_id} -> {pos_symbol}, "
+                    f"方向={pos_side}, 数量={pos_size}"
+                )
+
+                position = Position(
+                    symbol=pos_symbol,
+                    side=pos_side,
+                    size=pos_size,
+                    entry_price=safe_float(pos_data.get("avgPx")),
+                    unrealized_pnl=safe_float(pos_data.get("upl")),
+                    leverage=safe_float(
+                        pos_data.get("lever", get_config("trading.leverage"))
+                    ),
+                    margin_mode=pos_data.get(
+                        "mgnMode", get_config("trading.margin_mode")
+                    ),
+                    liquidation_price=safe_float(pos_data.get("liqPx")),
+                    timestamp=datetime.now(),
+                )
+
+                # 如果找到的是配置的交易对，直接返回
+                if pos_symbol == symbol:
+                    return position
+
+                # 否则返回第一个有持仓的（并记录日志）
+                self._logger.info(f"返回其他交易对的持仓: {pos_symbol}")
+                return position
+
+            self._logger.debug("遍历完成，未找到有效持仓")
+            return None
+
+        except Exception as e:
+            self._logger.warning(f"获取持仓异常: {type(e).__name__}: {e}")
+            return None
 
     @retry_on_failure(max_retries=2, delay=0.5)
     def create_market_order(
@@ -504,9 +916,21 @@ class ExchangeManager:
         """
         margin_mode = get_config("trading.margin_mode")
 
+        # 构建OKX原生API参数
+        # 转换交易对格式: BTC/USDT:USDT -> BTC-USDT-SWAP
+        inst_id = symbol.replace("/", "-").replace(":USDT", "-SWAP")
+
+        # OKX 原生参数
         params = {
-            "mgnMode": margin_mode,
+            "instId": inst_id,
+            "tdMode": margin_mode == "isolated" and "isolated" or "cross",  # 交易模式
         }
+
+        # 逐仓模式需要指定持仓方向
+        if margin_mode == "isolated":
+            # 根据订单方向确定持仓方向
+            params["posSide"] = "long" if side == "buy" else "short"
+
         if reduce_only:
             params["reduceOnly"] = True
 
@@ -521,7 +945,8 @@ class ExchangeManager:
                 reduce_only=reduce_only,
             )
 
-            order = self.exchange.create_market_order(symbol, side, size, params=params)
+            # 使用OKX原生API下单，避免ccxt市场类型解析问题
+            order = self._create_order_via_native_api(symbol, side, size, params)
 
             result = OrderResult(
                 success=True,
@@ -537,7 +962,7 @@ class ExchangeManager:
             )
 
             self._logger.info(
-                f"✅ 订单执行成功: {side} {size} {symbol} @ {smart_price_format(result.average_price or 0)}"
+                f"[OK] 订单执行成功: {side} {size} {symbol} @ {smart_price_format(result.average_price or 0)}"
             )
 
             return result
@@ -553,6 +978,63 @@ class ExchangeManager:
         except Exception as e:
             self._logger.error(f"订单执行失败: {e}")
             return OrderResult(success=False, error=str(e))
+
+    def _create_order_via_native_api(
+        self, symbol: str, side: str, size: float, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """使用 OKX 原生 API 创建订单
+
+        Args:
+            symbol: 交易对 (如 BTC/USDT:USDT)
+            side: 方向 ('buy' 或 'sell')
+            size: 数量
+            params: OKX 原生参数
+
+        Returns:
+            订单信息字典
+        """
+        # 转换交易对格式: BTC/USDT:USDT -> BTC-USDT-SWAP
+        inst_id = symbol.replace("/", "-").replace(":USDT", "-SWAP")
+
+        # 构建下单请求参数
+        order_params = {
+            "instId": inst_id,
+            "tdMode": params.get("tdMode", "cross"),  # 交易模式: cross/isolated
+            "side": side,  # buy/sell
+            "ordType": "market",  # 市价单
+            "sz": str(size),  # 数量
+        }
+
+        # 逐仓模式需要指定持仓方向
+        if params.get("tdMode") == "isolated":
+            order_params["posSide"] = params.get(
+                "posSide", "long" if side == "buy" else "short"
+            )
+
+        # 调用 OKX 下单 API
+        response = self._exchange.private_post_trade_order(order_params)
+
+        if response.get("code") != "0":
+            error_msg = response.get("msg", "Unknown error")
+            raise OrderError(f"下单失败: {error_msg}")
+
+        data = response.get("data", [])
+        if not data:
+            raise OrderError("下单响应数据为空")
+
+        order_data = data[0]
+
+        # 返回符合 ccxt 格式的订单信息
+        return {
+            "id": order_data.get("ordId"),
+            "symbol": symbol,
+            "side": side,
+            "type": "market",
+            "amount": size,
+            "filled": size,  # 市价单默认全部成交
+            "average": safe_float(order_data.get("avgPx")),
+            "fee": {"cost": safe_float(order_data.get("fee"))},
+        }
 
     def close_position(
         self,

@@ -196,9 +196,7 @@ class TradingLogger(logging.Logger):
             "reason": reason,
             **kwargs,
         }
-        self.info(
-            f"[SIGNAL] {signal} {symbol} ({confidence})", extra={"data": data}
-        )
+        self.info(f"[SIGNAL] {signal} {symbol} ({confidence})", extra={"data": data})
 
     def risk(
         self,
@@ -311,12 +309,17 @@ class LogManager:
         log_level = getattr(logging, level.upper(), logging.INFO)
 
         # 解析文件大小
-        size_multipliers = {"B": 1, "KB": 1024, "MB": 1024 * 1024, "GB": 1024 * 1024 * 1024}
+        size_multipliers = {
+            "GB": 1024 * 1024 * 1024,
+            "MB": 1024 * 1024,
+            "KB": 1024,
+            "B": 1,
+        }
         max_bytes = 10 * 1024 * 1024  # 默认 10MB
         if isinstance(max_size, str):
             for suffix, multiplier in size_multipliers.items():
                 if max_size.upper().endswith(suffix):
-                    max_bytes = int(float(max_size[:-len(suffix)]) * multiplier)
+                    max_bytes = int(float(max_size[: -len(suffix)]) * multiplier)
                     break
 
         self._config = {
