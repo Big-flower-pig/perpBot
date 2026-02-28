@@ -25,6 +25,7 @@ from utils.helpers import safe_float, calculate_pnl, smart_price_format
 @dataclass
 class Position:
     """持仓信息"""
+
     symbol: str
     side: str  # 'long' or 'short'
     size: float
@@ -33,6 +34,7 @@ class Position:
     leverage: float = 10
     margin_mode: str = "isolated"
     contract_size: float = 1.0
+    liquidation_price: float = 0.0  # 强平价格
     timestamp: datetime = field(default_factory=datetime.now)
 
     @property
@@ -64,6 +66,7 @@ class Position:
 @dataclass
 class CapitalTracking:
     """本金追踪数据"""
+
     initial_capital: float
     current_capital: float
     total_pnl: float
@@ -83,7 +86,9 @@ class CapitalTracking:
     def roi(self) -> float:
         """投资回报率"""
         if self.initial_capital > 0:
-            return ((self.current_capital - self.initial_capital) / self.initial_capital) * 100
+            return (
+                (self.current_capital - self.initial_capital) / self.initial_capital
+            ) * 100
         return 0
 
 
@@ -149,8 +154,12 @@ class PositionManager:
                             size=contracts,
                             entry_price=safe_float(pos.get("entryPrice")),
                             unrealized_pnl=safe_float(pos.get("unrealizedPnl")),
-                            leverage=safe_float(pos.get("leverage", get_config("trading.leverage"))),
-                            margin_mode=pos.get("mgnMode", get_config("trading.margin_mode")),
+                            leverage=safe_float(
+                                pos.get("leverage", get_config("trading.leverage"))
+                            ),
+                            margin_mode=pos.get(
+                                "mgnMode", get_config("trading.margin_mode")
+                            ),
                             contract_size=exchange.contract_size,
                         )
 
@@ -249,7 +258,9 @@ class PositionManager:
                 total_trades=data.get("total_trades", 0),
                 win_trades=data.get("win_trades", 0),
                 loss_trades=data.get("loss_trades", 0),
-                last_update=datetime.fromisoformat(data.get("last_update", datetime.now().isoformat())),
+                last_update=datetime.fromisoformat(
+                    data.get("last_update", datetime.now().isoformat())
+                ),
                 trade_history=data.get("trade_history", []),
             )
 
@@ -305,7 +316,9 @@ class PositionManager:
 
         # 更新统计
         self._tracking.total_pnl += pnl
-        self._tracking.current_capital = self._tracking.initial_capital + self._tracking.total_pnl
+        self._tracking.current_capital = (
+            self._tracking.initial_capital + self._tracking.total_pnl
+        )
         self._tracking.total_trades += 1
         self._tracking.last_update = datetime.now()
 
@@ -403,7 +416,9 @@ class PositionManager:
             contract_size=position.contract_size,
         )
 
-    def get_position_summary(self, position: Position, current_price: float) -> Dict[str, Any]:
+    def get_position_summary(
+        self, position: Position, current_price: float
+    ) -> Dict[str, Any]:
         """获取持仓摘要
 
         Args:

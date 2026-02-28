@@ -85,6 +85,19 @@ class TechnicalIndicators:
     dynamic_resistance: float = 0
     dynamic_support: float = 0
 
+    # ===== 新增: 专业指标 =====
+    # ATR (平均真实波幅) - 用于动态止损
+    atr: float = 0
+    atr_percent: float = 0  # ATR 占价格百分比
+
+    # ADX (平均趋向指数) - 用于趋势强度判断
+    adx: float = 0
+    plus_di: float = 0  # +DI
+    minus_di: float = 0  # -DI
+
+    # 市场状态
+    market_regime: str = "UNKNOWN"  # TRENDING / RANGING / TRANSITIONAL
+
 
 @dataclass
 class TrendAnalysis:
@@ -218,11 +231,144 @@ class StrategyEngine:
             indicators.dynamic_resistance = indicators.bb_upper
             indicators.dynamic_support = indicators.bb_lower
 
+            # ===== 新增: 计算 ATR =====
+            atr = self._calculate_atr(df)
+            indicators.atr = atr
+            current_price = safe_float(df["close"].iloc[-1])
+            if current_price > 0:
+                indicators.atr_percent = (atr / current_price) * 100
+
+            # ===== 新增: 计算 ADX =====
+            adx, plus_di, minus_di = self._calculate_adx(df)
+            indicators.adx = adx
+            indicators.plus_di = plus_di
+            indicators.minus_di = minus_di
+
+            # ===== 新增: 判断市场状态 =====
+            indicators.market_regime = self._detect_market_regime(indicators)
+
             return indicators
 
         except Exception as e:
             self._logger.error(f"计算技术指标失败: {e}")
             return TechnicalIndicators()
+
+    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """计算 ATR (Average True Range)
+
+        ATR 用于衡量市场波动性，是设置止损止盈的重要参考。
+
+        Args:
+            df: K线数据
+            period: 计算周期
+
+        Returns:
+            ATR 值
+        """
+        try:
+            # 计算真实波幅 (True Range)
+            high = df["high"]
+            low = df["low"]
+            close = df["close"]
+
+            prev_close = close.shift(1)
+
+            tr1 = high - low  # 当日最高-最低
+            tr2 = abs(high - prev_close)  # 当日最高-昨收
+            tr3 = abs(low - prev_close)  # 当日最低-昨收
+
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+            # 计算 ATR (指数移动平均)
+            atr = tr.ewm(span=period, adjust=False).mean().iloc[-1]
+
+            return safe_float(atr, 0)
+
+        except Exception as e:
+            self._logger.debug(f"ATR 计算失败: {e}")
+            return 0
+
+    def _calculate_adx(
+        self, df: pd.DataFrame, period: int = 14
+    ) -> Tuple[float, float, float]:
+        """计算 ADX (Average Directional Index)
+
+        ADX 用于判断趋势强度:
+        - ADX > 25: 强趋势
+        - ADX < 20: 无趋势或震荡
+        - +DI > -DI: 多头趋势
+        - -DI > +DI: 空头趋势
+
+        Args:
+            df: K线数据
+            period: 计算周期
+
+        Returns:
+            (ADX, +DI, -DI)
+        """
+        try:
+            high = df["high"]
+            low = df["low"]
+            close = df["close"]
+
+            # 计算 +DM 和 -DM
+            plus_dm = high.diff()
+            minus_dm = -low.diff()
+
+            # +DM: 当日高点-昨日高点 > 昨日低点-当日低点 且 > 0
+            plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+            # -DM: 昨日低点-当日低点 > 当日高点-昨日高点 且 > 0
+            minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+
+            # 计算 True Range
+            tr1 = high - low
+            tr2 = abs(high - close.shift(1))
+            tr3 = abs(low - close.shift(1))
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+            # 平滑处理
+            atr = tr.ewm(span=period, adjust=False).mean()
+            plus_di = 100 * (plus_dm.ewm(span=period, adjust=False).mean() / atr)
+            minus_di = 100 * (minus_dm.ewm(span=period, adjust=False).mean() / atr)
+
+            # 计算 DX 和 ADX
+            dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+            adx = dx.ewm(span=period, adjust=False).mean().iloc[-1]
+
+            return (
+                safe_float(adx, 0),
+                safe_float(plus_di.iloc[-1], 0),
+                safe_float(minus_di.iloc[-1], 0),
+            )
+
+        except Exception as e:
+            self._logger.debug(f"ADX 计算失败: {e}")
+            return 0, 0, 0
+
+    def _detect_market_regime(self, indicators: TechnicalIndicators) -> str:
+        """检测市场状态
+
+        根据ADX和ATR判断当前市场处于趋势还是震荡状态。
+
+        Args:
+            indicators: 技术指标
+
+        Returns:
+            市场状态: TRENDING / RANGING / TRANSITIONAL
+        """
+        adx = indicators.adx
+        atr_pct = indicators.atr_percent
+
+        # ADX > 25 且 ATR% > 1%: 明显趋势
+        if adx > 25 and atr_pct > 1.0:
+            return "TRENDING"
+
+        # ADX < 20 且 ATR% < 0.5%: 明显震荡
+        if adx < 20 and atr_pct < 0.5:
+            return "RANGING"
+
+        # 其他情况: 过渡状态
+        return "TRANSITIONAL"
 
     def analyze_trend(
         self,
@@ -316,7 +462,12 @@ class StrategyEngine:
         trend: TrendAnalysis,
         current_position: Optional[Dict] = None,
     ) -> SignalResult:
-        """生成交易信号
+        """生成交易信号 (优化版: 基于市场状态的智能信号)
+
+        核心改进:
+        1. 根据 ADX 判断市场状态 (趋势/震荡)
+        2. 趋势市使用趋势策略，震荡市使用均值回归策略
+        3. 使用 ATR 动态计算止损止盈
 
         Args:
             df: K线数据
@@ -336,80 +487,35 @@ class StrategyEngine:
             reason = ""
             confidence = Confidence.MEDIUM
 
-            # 止损止盈计算
-            stop_loss_pct = get_config("risk.stop_loss_percent", 3.0)
-            take_profit_pct = get_config("risk.take_profit_percent", 5.0)
+            # ===== 核心改进: 基于市场状态的策略选择 =====
+            market_regime = indicators.market_regime
+            adx = indicators.adx
 
-            # 趋势判断逻辑
-            if trend.overall == Trend.STRONG_UP:
-                # 强势上涨趋势
-                if indicators.rsi < 70:  # 未超买
-                    signal = Signal.BUY
-                    reason = f"强势上涨趋势，RSI={indicators.rsi:.1f}，MACD看涨"
-                    confidence = Confidence.HIGH
-                elif indicators.rsi > 80:
-                    signal = Signal.HOLD
-                    reason = "强势上涨但严重超买，建议观望"
-                    confidence = Confidence.LOW
-                else:
-                    signal = Signal.HOLD
-                    reason = "强势上涨但接近超买，谨慎操作"
-                    confidence = Confidence.MEDIUM
+            # 记录市场状态
+            self._logger.debug(
+                f"市场状态: {market_regime}, ADX={adx:.1f}, "
+                f"ATR%={indicators.atr_percent:.2f}%"
+            )
 
-            elif trend.overall == Trend.STRONG_DOWN:
-                # 强势下跌趋势
-                if indicators.rsi > 30:  # 未超卖
-                    signal = Signal.SELL
-                    reason = f"强势下跌趋势，RSI={indicators.rsi:.1f}，MACD看跌"
-                    confidence = Confidence.HIGH
-                elif indicators.rsi < 20:
-                    signal = Signal.HOLD
-                    reason = "强势下跌但严重超卖，可能反弹"
-                    confidence = Confidence.LOW
-                else:
-                    signal = Signal.SELL
-                    reason = "强势下跌趋势延续"
-                    confidence = Confidence.MEDIUM
+            # ===== 策略1: 趋势市场 (ADX > 25) =====
+            if market_regime == "TRENDING":
+                signal, reason, confidence = self._trend_strategy(
+                    indicators, trend, current_price
+                )
 
-            elif trend.overall == Trend.WEAK_UP:
-                # 弱势上涨
-                if indicators.macd > indicators.macd_signal and indicators.rsi < 65:
-                    signal = Signal.BUY
-                    reason = "弱势上涨，MACD金叉确认"
-                    confidence = Confidence.MEDIUM
-                else:
-                    signal = Signal.HOLD
-                    reason = "上涨动能不足，建议观望"
-                    confidence = Confidence.LOW
+            # ===== 策略2: 震荡市场 (ADX < 20) =====
+            elif market_regime == "RANGING":
+                signal, reason, confidence = self._range_strategy(
+                    indicators, current_price
+                )
 
-            elif trend.overall == Trend.WEAK_DOWN:
-                # 弱势下跌
-                if indicators.macd < indicators.macd_signal and indicators.rsi > 35:
-                    signal = Signal.SELL
-                    reason = "弱势下跌，MACD死叉确认"
-                    confidence = Confidence.MEDIUM
-                else:
-                    signal = Signal.HOLD
-                    reason = "下跌动能不足，建议观望"
-                    confidence = Confidence.LOW
-
+            # ===== 策略3: 过渡状态 (20 <= ADX <= 25) =====
             else:
-                # 震荡整理
-                # 检查是否突破布林带
-                if indicators.bb_position > 0.8:
-                    signal = Signal.BUY
-                    reason = "突破布林带上轨，可能启动上涨"
-                    confidence = Confidence.MEDIUM
-                elif indicators.bb_position < 0.2:
-                    signal = Signal.SELL
-                    reason = "跌破布林带下轨，可能启动下跌"
-                    confidence = Confidence.MEDIUM
-                else:
-                    signal = Signal.HOLD
-                    reason = "震荡整理，无明确方向"
-                    confidence = Confidence.LOW
+                signal, reason, confidence = self._transitional_strategy(
+                    indicators, trend, current_price
+                )
 
-            # 成交量确认
+            # ===== 成交量确认 =====
             if signal != Signal.HOLD:
                 if indicators.volume_ratio < 1.0:
                     # 成交量不足，降低信心
@@ -417,22 +523,19 @@ class StrategyEngine:
                         confidence = Confidence.MEDIUM
                     elif confidence == Confidence.MEDIUM:
                         confidence = Confidence.LOW
-                    reason += "（成交量偏低）"
+                    reason += " (量能不足)"
                 elif indicators.volume_ratio > 2.0:
                     # 成交量放大，增强信心
                     confidence = Confidence.HIGH
-                    reason += "（成交量放大）"
+                    reason += " (量能强劲)"
 
-            # 计算止损止盈价格
-            if signal == Signal.BUY:
-                stop_loss = current_price * (1 - stop_loss_pct / 100)
-                take_profit = current_price * (1 + take_profit_pct / 100)
-            elif signal == Signal.SELL:
-                stop_loss = current_price * (1 + stop_loss_pct / 100)
-                take_profit = current_price * (1 - take_profit_pct / 100)
-            else:
-                stop_loss = 0
-                take_profit = 0
+            # ===== 核心改进: 使用 ATR 动态止损止盈 =====
+            stop_loss, take_profit = self._calculate_dynamic_stops(
+                current_price=current_price,
+                atr=indicators.atr,
+                signal=signal,
+                risk_reward_ratio=2.0,  # 盈亏比 1:2
+            )
 
             result = SignalResult(
                 signal=signal,
@@ -468,6 +571,210 @@ class StrategyEngine:
                 stop_loss=0,
                 take_profit=0,
             )
+
+    def _trend_strategy(
+        self,
+        indicators: TechnicalIndicators,
+        trend: TrendAnalysis,
+        current_price: float,
+    ) -> Tuple[Signal, str, Confidence]:
+        """趋势市场策略
+
+        在明确的趋势市场中，顺势交易。
+
+        Args:
+            indicators: 技术指标
+            trend: 趋势分析
+            current_price: 当前价格
+
+        Returns:
+            (信号, 原因, 信心程度)
+        """
+        signal = Signal.HOLD
+        reason = ""
+        confidence = Confidence.MEDIUM
+
+        # 判断趋势方向
+        is_uptrend = indicators.plus_di > indicators.minus_di
+        is_downtrend = indicators.minus_di > indicators.plus_di
+
+        if is_uptrend:
+            # 多头趋势 - 寻找做多机会
+            if indicators.rsi < 70:
+                # RSI 未超买，可以入场
+                if trend.overall in [Trend.STRONG_UP, Trend.WEAK_UP]:
+                    signal = Signal.BUY
+                    if indicators.adx > 40:
+                        confidence = Confidence.HIGH
+                        reason = f"强多头趋势 (ADX={indicators.adx:.1f}, +DI>{'-DI'})"
+                    else:
+                        confidence = Confidence.MEDIUM
+                        reason = f"多头趋势确立 (ADX={indicators.adx:.1f})"
+                else:
+                    signal = Signal.BUY
+                    confidence = Confidence.LOW
+                    reason = "趋势形成中，轻仓试探"
+            else:
+                signal = Signal.HOLD
+                reason = f"多头趋势但 RSI 超买 ({indicators.rsi:.1f})，等待回调"
+
+        elif is_downtrend:
+            # 空头趋势 - 寻找做空机会
+            if indicators.rsi > 30:
+                # RSI 未超卖，可以入场
+                if trend.overall in [Trend.STRONG_DOWN, Trend.WEAK_DOWN]:
+                    signal = Signal.SELL
+                    if indicators.adx > 40:
+                        confidence = Confidence.HIGH
+                        reason = f"强空头趋势 (ADX={indicators.adx:.1f}, -DI>{'+DI'})"
+                    else:
+                        confidence = Confidence.MEDIUM
+                        reason = f"空头趋势确立 (ADX={indicators.adx:.1f})"
+                else:
+                    signal = Signal.SELL
+                    confidence = Confidence.LOW
+                    reason = "趋势形成中，轻仓试探"
+            else:
+                signal = Signal.HOLD
+                reason = f"空头趋势但 RSI 超卖 ({indicators.rsi:.1f})，等待反弹"
+
+        else:
+            signal = Signal.HOLD
+            reason = "趋势方向不明确，观望"
+
+        return signal, reason, confidence
+
+    def _range_strategy(
+        self,
+        indicators: TechnicalIndicators,
+        current_price: float,
+    ) -> Tuple[Signal, str, Confidence]:
+        """震荡市场策略
+
+        在震荡市场中，使用均值回归策略，低买高卖。
+
+        Args:
+            indicators: 技术指标
+            current_price: 当前价格
+
+        Returns:
+            (信号, 原因, 信心程度)
+        """
+        signal = Signal.HOLD
+        reason = ""
+        confidence = Confidence.MEDIUM
+
+        # 使用布林带和 RSI 判断超买超卖
+        bb_pos = indicators.bb_position
+        rsi = indicators.rsi
+
+        # 超卖区域 - 买入信号
+        if bb_pos < 0.2 and rsi < 35:
+            signal = Signal.BUY
+            if rsi < 25:
+                confidence = Confidence.HIGH
+                reason = f"深度超卖 (RSI={rsi:.1f}, BB位置={bb_pos:.1%})"
+            else:
+                confidence = Confidence.MEDIUM
+                reason = f"超卖区域 (RSI={rsi:.1f})"
+
+        # 超买区域 - 卖出信号
+        elif bb_pos > 0.8 and rsi > 65:
+            signal = Signal.SELL
+            if rsi > 75:
+                confidence = Confidence.HIGH
+                reason = f"深度超买 (RSI={rsi:.1f}, BB位置={bb_pos:.1%})"
+            else:
+                confidence = Confidence.MEDIUM
+                reason = f"超买区域 (RSI={rsi:.1f})"
+
+        # 中性区域 - 观望
+        else:
+            signal = Signal.HOLD
+            reason = f"震荡中继 (RSI={rsi:.1f}, BB位置={bb_pos:.1%})"
+
+        return signal, reason, confidence
+
+    def _transitional_strategy(
+        self,
+        indicators: TechnicalIndicators,
+        trend: TrendAnalysis,
+        current_price: float,
+    ) -> Tuple[Signal, str, Confidence]:
+        """过渡状态策略
+
+        在趋势不明确时，保守观望或轻仓试探。
+
+        Args:
+            indicators: 技术指标
+            trend: 趋势分析
+            current_price: 当前价格
+
+        Returns:
+            (信号, 原因, 信心程度)
+        """
+        signal = Signal.HOLD
+        reason = ""
+        confidence = Confidence.LOW
+
+        # 等待明确信号
+        # 只有在极端情况下才入场
+        if indicators.rsi < 25:
+            signal = Signal.BUY
+            reason = "极端超卖，可能反弹"
+        elif indicators.rsi > 75:
+            signal = Signal.SELL
+            reason = "极端超买，可能回调"
+        else:
+            signal = Signal.HOLD
+            reason = "市场方向不明，等待确认"
+
+        return signal, reason, confidence
+
+    def _calculate_dynamic_stops(
+        self,
+        current_price: float,
+        atr: float,
+        signal: Signal,
+        risk_reward_ratio: float = 2.0,
+        atr_multiplier: float = 2.0,
+    ) -> Tuple[float, float]:
+        """基于 ATR 的动态止损止盈计算
+
+        核心原理:
+        - 止损距离 = ATR × 倍数 (通常 1.5-2.0)
+        - 止盈距离 = 止损距离 × 盈亏比
+
+        Args:
+            current_price: 当前价格
+            atr: ATR 值
+            signal: 交易信号
+            risk_reward_ratio: 盈亏比
+            atr_multiplier: ATR 倍数
+
+        Returns:
+            (止损价, 止盈价)
+        """
+        if signal == Signal.HOLD or atr <= 0:
+            return 0, 0
+
+        # 止损距离
+        stop_distance = atr * atr_multiplier
+        # 止盈距离
+        take_profit_distance = stop_distance * risk_reward_ratio
+
+        if signal == Signal.BUY:
+            stop_loss = current_price - stop_distance
+            take_profit = current_price + take_profit_distance
+        else:  # SELL
+            stop_loss = current_price + stop_distance
+            take_profit = current_price - take_profit_distance
+
+        # 确保止损止盈为正数
+        stop_loss = max(stop_loss, 0)
+        take_profit = max(take_profit, 0)
+
+        return stop_loss, take_profit
 
     def analyze(
         self,

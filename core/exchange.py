@@ -62,6 +62,9 @@ from utils.config import get_config
 from utils.decorators import retry_on_failure, rate_limit, log_execution_time
 from utils.helpers import safe_float, smart_price_format
 
+# 导入统一的 Position dataclass（避免重复定义）
+from core.position import Position as PositionDataclass
+
 
 class OrderSide(Enum):
     """订单方向"""
@@ -121,39 +124,9 @@ class Ticker:
         return (self.spread / self.last) * 100 if self.last > 0 else 0
 
 
-@dataclass
-class Position:
-    """持仓信息"""
-
-    symbol: str
-    side: str  # 'long' 或 'short'
-    size: float  # 合约张数
-    entry_price: float  # 入场价
-    unrealized_pnl: float  # 未实现盈亏
-    leverage: float  # 杠杆
-    margin_mode: str  # 仓位模式
-    liquidation_price: Optional[float] = None  # 强平价
-    timestamp: Optional[datetime] = None
-
-    @property
-    def is_long(self) -> bool:
-        return self.side == "long"
-
-    @property
-    def is_short(self) -> bool:
-        return self.side == "short"
-
-    @property
-    def position_value(self) -> float:
-        """仓位价值"""
-        return self.size * self.entry_price
-
-    @property
-    def pnl_percent(self) -> float:
-        """盈亏百分比（相对入场价）"""
-        if self.entry_price > 0:
-            return (self.unrealized_pnl / (self.position_value / self.leverage)) * 100
-        return 0
+# 使用 core.position 模块中的 Position dataclass
+# 为保持向后兼容，创建一个别名
+Position = PositionDataclass
 
 
 @dataclass

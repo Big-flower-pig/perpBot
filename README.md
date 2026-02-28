@@ -9,9 +9,12 @@
 ## ✨ 特性
 
 - 🤖 **AI 驱动决策** - 集成 DeepSeek API 进行智能交易分析
-- 📊 **技术分析** - 支持 MA、RSI、MACD、布林带等多种技术指标
-- ⚠️ **风险管理** - 完善的风险控制，包括止损止盈、仓位管理、日内限制
-- 📈 **复利模式** - 支持复利交易，自动追踪本金变化
+- 🧠 **AI 决策记忆** - 学习历史成功/失败模式，自适应优化决策
+- 📊 **专业技术分析** - MA、RSI、MACD、布林带、ATR、ADX 等多种指标
+- 📈 **市场状态识别** - 自动识别趋势/震荡/过渡市场状态
+- ⚠️ **专业风险管理** - 凯利公式仓位、VaR风险计算、动态止损止盈
+- 📉 **ATR 动态止损** - 基于波动率的智能止损，适应市场变化
+- 🔄 **复利模式** - 支持复利交易，自动追踪本金变化
 - 🔔 **实时通知** - Telegram 消息推送，随时掌握交易动态
 - 📉 **异常检测** - 价格异常、成交量异常、波动率异常检测
 - 🛠️ **模块化设计** - 清晰的代码架构，易于扩展和维护
@@ -454,29 +457,64 @@ ohlcv = exchange.get_ohlcv("BTC/USDT:USDT", timeframe="1h", limit=100)
 result = exchange.create_market_order("BTC/USDT:USDT", "buy", 0.1)
 ```
 
-### StrategyEngine (策略引擎)
+### StrategyEngine (策略引擎) - 专业版
 
 ```python
 from core import StrategyEngine
 
 strategy = StrategyEngine()
 
-# 计算技术指标
+# 计算技术指标（包含 ATR、ADX）
 indicators = strategy.calculate_indicators(ohlcv)
 
-# 分析趋势
-trend = strategy.analyze_trend(indicators)
+# 市场状态识别
+# TRENDING: 趋势市场，ADX > 25
+# RANGING: 震荡市场，ADX < 20
+# TRANSITIONAL: 过渡状态
+market_regime = indicators.market_regime
 
-# 生成信号
-signal = strategy.generate_signal(indicators, trend)
+# ATR 动态止损
+stop_loss, take_profit = strategy._calculate_dynamic_stops(
+    current_price=95000,
+    atr=500,
+    side="long"
+)
+
+# 根据市场状态使用不同策略
+if market_regime == "TRENDING":
+    signal = strategy._trend_strategy(indicators)
+elif market_regime == "RANGING":
+    signal = strategy._range_strategy(indicators)
 ```
 
-### RiskManager (风险管理)
+### RiskManager (风险管理) - 专业版
 
 ```python
 from core import get_risk_manager
 
 risk = get_risk_manager()
+
+# 凯利公式仓位计算
+position_size = risk.calculate_position_size(
+    capital=1000,
+    price=95000,
+    confidence="HIGH",
+    use_kelly=True  # 启用凯利公式
+)
+
+# VaR 风险计算
+var_result = risk.calculate_var(
+    capital=1000,
+    confidence_level=0.95,
+    holding_period_days=1
+)
+print(f"95%置信度下最大可能损失: {var_result['var']:.2f} USDT")
+
+# 获取性能指标
+metrics = risk.get_performance_metrics()
+print(f"胜率: {metrics.win_rate:.1f}%")
+print(f"夏普比率: {metrics.sharpe_ratio:.2f}")
+print(f"凯利比例: {metrics.kelly_fraction:.1%}")
 
 # 评估交易
 assessment = risk.assess_trade(
@@ -490,14 +528,14 @@ if assessment.approved:
     print("交易通过风险评估")
 ```
 
-### DeepSeekAnalyzer (AI 分析)
+### DeepSeekAnalyzer (AI 分析) - 增强版
 
 ```python
 from ai import get_analyzer
 
 analyzer = get_analyzer()
 
-# 分析市场
+# 分析市场（自动注入历史经验）
 decision = analyzer.analyze(
     market_data={...},
     indicators={...},
@@ -506,7 +544,21 @@ decision = analyzer.analyze(
 
 print(f"决策: {decision.decision.value}")
 print(f"信心: {decision.confidence.value}")
+print(f"市场状态: {decision.market_regime}")
 print(f"理由: {decision.reason}")
+
+# 记录决策结果（用于学习）
+analyzer.record_outcome(
+    decision_id="20240101_123456_BUY",
+    pnl=15.50,
+    exit_price=95500,
+    holding_time_minutes=30
+)
+
+# 获取记忆系统统计
+stats = analyzer.get_memory_stats()
+print(f"总体胜率: {stats['memory']['overall_win_rate']:.1f}%")
+print(f"最佳市场状态: {stats['memory']['best_regime']}")
 ```
 
 ## 🛡️ 风险控制
@@ -518,16 +570,23 @@ print(f"理由: {decision.reason}")
    - 持仓数量限制
    - 连续亏损限制
 
-2. **仓位管理**
-   - 基于信心的仓位调整
-   - 最大持仓限制
-   - 复利/固定模式
+2. **仓位管理 (凯利公式)**
+   - 基于历史胜率和盈亏比计算最优仓位
+   - 半凯利策略降低风险
+   - 信心程度调整
+   - 最大仓位限制 (50%)
 
-3. **止损止盈**
-   - 自动计算止损止盈价位
-   - 支持追踪止损
+3. **止损止盈 (ATR 动态)**
+   - 基于 ATR 自动计算止损止盈价位
+   - 趋势市场: 2倍ATR止损, 3倍ATR止盈
+   - 震荡市场: 1.5倍ATR止损, 2倍ATR止盈
 
-4. **实时监控**
+4. **VaR 风险管理**
+   - 95%置信度下最大可能损失计算
+   - 历史模拟法
+   - 持有期调整
+
+5. **实时监控**
    - 持仓风险评估
    - 价格异常检测
    - 自动平仓机制
@@ -541,13 +600,36 @@ print(f"理由: {decision.reason}")
 | HIGH | 高风险 | 禁止开仓 |
 | CRITICAL | 极高风险 | 强制平仓 |
 
+### 市场状态识别
+
+| 状态 | ADX 值 | 特征 | 策略 |
+|------|--------|------|------|
+| TRENDING | > 25 | 强趋势 | 趋势跟踪 |
+| RANGING | < 20 | 震荡区间 | 支撑阻力 |
+| TRANSITIONAL | 20-25 | 过渡状态 | 谨慎观望 |
+
 ## 👨‍💻 开发指南
 
 ### 添加新策略
 
 1. 在 `core/strategy.py` 中添加新指标计算方法
-2. 在 `analyze_trend()` 中集成新指标
-3. 更新信号生成逻辑
+2. 在 `_calculate_indicators()` 中集成新指标
+3. 更新 `TechnicalIndicators` 数据类
+4. 在对应市场状态策略中集成
+
+### 扩展 AI 记忆系统
+
+```python
+# 添加自定义记忆模式
+analyzer._memory.success_patterns.append({
+    "decision": "BUY",
+    "market_regime": "TRENDING",
+    "key_factors": ["RSI超卖", "MACD金叉"],
+})
+
+# 获取经验教训
+lessons = analyzer._memory.get_lessons_learned()
+```
 
 ### 添加新通知渠道
 
@@ -567,6 +649,9 @@ print(f"理由: {decision.reason}")
 ```bash
 # 安装开发依赖
 pip install -r requirements.txt
+
+# 验证模块导入
+python -c "from core.risk_manager import RiskManager; print('OK')"
 
 # 运行测试
 python -m pytest tests/ -v

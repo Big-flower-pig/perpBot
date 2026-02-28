@@ -338,7 +338,9 @@ class TradingBot:
     def _register_signals(self):
         """注册信号处理函数"""
         signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        # SIGTERM 在 Windows 平台不存在
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, self._signal_handler)
 
     def _signal_handler(self, signum, frame):
         """信号处理函数"""
