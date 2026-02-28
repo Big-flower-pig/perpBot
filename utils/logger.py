@@ -438,6 +438,10 @@ def setup_logger(
     )
 
 
+# Alias for backward compatibility
+setup_logging = setup_logger
+
+
 def get_logger(name: str) -> TradingLogger:
     """获取日志器
 
