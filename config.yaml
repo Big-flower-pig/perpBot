@@ -1,0 +1,153 @@
+# PerpBot 量化交易系统配置文件
+# 版本: 1.0
+
+# ==================== 交易所配置 ====================
+exchange:
+  name: okx
+  sandbox: true  # 模拟盘模式
+  # API 密钥从环境变量读取，不要在此处硬编码
+  api_key: ${OKX_API_KEY}
+  secret: ${OKX_SECRET}
+  password: ${OKX_PASSWORD}
+  # 请求配置
+  rate_limit: true  # 启用请求限流
+  timeout: 30000    # 请求超时（毫秒）
+
+# ==================== 交易配置 ====================
+trading:
+  symbol: BTC/USDT:USDT  # 交易对
+  leverage: 10           # 杠杆倍数
+  timeframe: 15m         # K线周期
+  margin_mode: isolated  # 仓位模式: cross(全仓) / isolated(逐仓)
+  test_mode: false       # 测试模式（仅分析不下单）
+  data_points: 96        # 获取K线数量
+
+# ==================== AI 配置 ====================
+ai:
+  provider: deepseek
+  api_key: ${DEEPSEEK_API_KEY}
+  model: deepseek-chat
+  temperature: 0.1
+  max_tokens: 1000
+  timeout: 30  # API 超时（秒）
+  retry:
+    max_attempts: 3
+    delay: 1
+
+# ==================== 仓位管理 ====================
+position:
+  mode: compound  # fixed(固定) / compound(复利)
+  initial_capital: 100  # 初始本金 (USDT)
+  base_usdt_amount: 100  # 固定模式基础金额
+  fixed_contracts: 0.1   # 固定仓位模式下的合约张数
+  max_position_ratio: 1.0  # 最大仓位比例
+  # 信心程度倍数（用于调整仓位）
+  confidence_multipliers:
+    high: 1.0
+    medium: 0.8
+    low: 0.5
+  trend_strength_multiplier: 1.0
+
+# ==================== 风险管理 ====================
+risk:
+  # 止损止盈
+  stop_loss_percent: 3.0      # 止损百分比
+  take_profit_percent: 5.0    # 止盈百分比
+  trailing_stop_percent: 2.0  # 移动止盈回撤百分比
+
+  # 限额控制
+  max_daily_loss: 10.0        # 日内最大亏损百分比
+  max_trades_per_day: 20      # 每日最大交易次数
+  max_position_value: 1000    # 最大持仓价值 (USDT)
+
+  # 风险评估
+  risk_per_trade: 0.02        # 单笔交易风险比例
+  max_drawdown: 20.0          # 最大回撤百分比
+
+  # 跳过低信心信号
+  skip_low_confidence: true
+
+# ==================== 监控配置 ====================
+monitoring:
+  enabled: true
+  check_interval: 10          # 检查间隔（秒）
+
+  # 价格监控
+  price_change_threshold: 1.0   # 价格变化阈值 (%)
+  rapid_change_threshold: 2.0   # 价格急变阈值 (%)
+
+  # 成交量监控
+  volume_spike_threshold: 3.0   # 成交量异常倍数
+
+  # 突破监控
+  breakout_check: true
+
+  # 冷却时间
+  cooldown_seconds: 60          # 异常触发后冷却时间
+
+# ==================== 通知配置 ====================
+notification:
+  telegram:
+    enabled: true
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    parse_mode: HTML
+
+  # 通知开关
+  notify_on_trade: true         # 交易时通知
+  notify_on_error: true         # 错误时通知
+  notify_on_daily_report: true  # 每日报告
+  daily_report_time: "23:59"    # 每日报告时间
+
+# ==================== 日志配置 ====================
+logging:
+  level: INFO                   # DEBUG / INFO / WARNING / ERROR / CRITICAL
+  console: true                 # 控制台输出
+  file: true                    # 文件输出
+  file_path: logs/trading.log
+  max_size: 10MB                # 单文件最大大小
+  backup_count: 5               # 保留文件数量
+  json_format: false            # JSON 格式日志
+  colorize: true                # 彩色输出
+
+# ==================== 数据库配置 ====================
+database:
+  type: sqlite                  # sqlite / postgresql / mysql
+  path: data/perpbot.db
+  # PostgreSQL 示例
+  # host: localhost
+  # port: 5432
+  # name: perpbot
+  # user: ${DB_USER}
+  # password: ${DB_PASSWORD}
+
+# ==================== 回测配置 ====================
+backtest:
+  initial_capital: 1000         # 回测初始资金
+  commission: 0.0006            # 手续费率 (0.06%)
+  slippage: 0.0001              # 滑点 (0.01%)
+  data_dir: data/historical     # 历史数据目录
+
+# ==================== 分析周期配置 ====================
+analysis_periods:
+  short_term: 20
+  medium_term: 50
+  long_term: 96
+
+# ==================== 高级配置 ====================
+advanced:
+  # 重试配置
+  retry:
+    max_attempts: 3
+    delay: 1
+    exponential_backoff: true
+
+  # 并发配置
+  concurrency:
+    max_workers: 4
+    monitor_threads: 1
+
+  # 缓存配置
+  cache:
+    enabled: true
+    ttl: 60  # 缓存过期时间（秒）
