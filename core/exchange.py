@@ -28,24 +28,28 @@ from utils.helpers import safe_float, smart_price_format
 
 class OrderSide(Enum):
     """订单方向"""
+
     BUY = "buy"
     SELL = "sell"
 
 
 class OrderType(Enum):
     """订单类型"""
+
     MARKET = "market"
     LIMIT = "limit"
 
 
 class MarginMode(Enum):
     """仓位模式"""
+
     CROSS = "cross"
     ISOLATED = "isolated"
 
 
 class PositionSide(Enum):
     """持仓方向"""
+
     LONG = "long"
     SHORT = "short"
 
@@ -53,6 +57,7 @@ class PositionSide(Enum):
 @dataclass
 class Ticker:
     """行情数据"""
+
     symbol: str
     bid: float  # 买一价
     ask: float  # 卖一价
@@ -76,6 +81,7 @@ class Ticker:
 @dataclass
 class Position:
     """持仓信息"""
+
     symbol: str
     side: str  # 'long' 或 'short'
     size: float  # 合约张数
@@ -110,6 +116,7 @@ class Position:
 @dataclass
 class OrderResult:
     """订单结果"""
+
     success: bool
     order_id: Optional[str] = None
     symbol: Optional[str] = None
@@ -126,21 +133,25 @@ class OrderResult:
 
 class ExchangeError(Exception):
     """交易所错误"""
+
     pass
 
 
 class ConnectionError(ExchangeError):
     """连接错误"""
+
     pass
 
 
 class OrderError(ExchangeError):
     """订单错误"""
+
     pass
 
 
 class InsufficientFundsError(ExchangeError):
     """资金不足错误"""
+
     pass
 
 
@@ -281,7 +292,9 @@ class ExchangeManager:
             market = markets[symbol]
             self._market_info = {
                 "contract_size": float(market.get("contractSize", 1)),
-                "min_amount": market.get("limits", {}).get("amount", {}).get("min", 0.01),
+                "min_amount": market.get("limits", {})
+                .get("amount", {})
+                .get("min", 0.01),
                 "price_precision": market.get("precision", {}).get("price", 8),
                 "amount_precision": market.get("precision", {}).get("amount", 2),
                 "symbol": symbol,
@@ -458,8 +471,12 @@ class ExchangeManager:
                         size=contracts,
                         entry_price=safe_float(pos.get("entryPrice")),
                         unrealized_pnl=safe_float(pos.get("unrealizedPnl")),
-                        leverage=safe_float(pos.get("leverage", get_config("trading.leverage"))),
-                        margin_mode=pos.get("mgnMode", get_config("trading.margin_mode")),
+                        leverage=safe_float(
+                            pos.get("leverage", get_config("trading.leverage"))
+                        ),
+                        margin_mode=pos.get(
+                            "mgnMode", get_config("trading.margin_mode")
+                        ),
                         liquidation_price=safe_float(pos.get("liquidationPrice")),
                         timestamp=datetime.now(),
                     )
@@ -606,3 +623,7 @@ def get_exchange() -> ExchangeManager:
     if _exchange_manager is None:
         _exchange_manager = ExchangeManager()
     return _exchange_manager
+
+
+# Alias for backward compatibility
+get_exchange_manager = get_exchange
