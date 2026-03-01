@@ -243,9 +243,11 @@ class TradingBot:
             self._logger.info(f"  交易对: {position.symbol}")
             self._logger.info(f"  方向: {'多头' if position.is_long else '空头'}")
             self._logger.info(f"  数量: {position.size}")
-            self._logger.info(f"  入场价: {position.entry_price:.4f}")
+            entry_price_val = position.entry_price or 0
+            self._logger.info(f"  入场价: {entry_price_val:.4f}")
             self._logger.info(f"  未实现盈亏: {pnl:+.2f} USDT ({pnl_percent:+.2f}%)")
-            self._logger.info(f"  杠杆: {position.leverage}x")
+            leverage_val = position.leverage or 10
+            self._logger.info(f"  杠杆: {leverage_val}x")
             self._logger.info("=" * 50)
 
             # 获取当前价格和技术指标
@@ -294,10 +296,12 @@ class TradingBot:
             self._logger.info(f"  决策: {ai_decision.decision.value}")
             self._logger.info(f"  信心: {ai_decision.confidence.value}")
             self._logger.info(f"  理由: {ai_decision.reason}")
-            if ai_decision.stop_loss > 0:
-                self._logger.info(f"  建议止损: {ai_decision.stop_loss:.4f}")
-            if ai_decision.take_profit > 0:
-                self._logger.info(f"  建议止盈: {ai_decision.take_profit:.4f}")
+            stop_loss_val = ai_decision.stop_loss or 0
+            take_profit_val = ai_decision.take_profit or 0
+            if stop_loss_val > 0:
+                self._logger.info(f"  建议止损: {stop_loss_val:.4f}")
+            if take_profit_val > 0:
+                self._logger.info(f"  建议止盈: {take_profit_val:.4f}")
             self._logger.info("=" * 50)
 
             # 发送通知
@@ -312,8 +316,8 @@ class TradingBot:
                 f"盈亏: {pnl:+.2f} USDT ({pnl_percent:+.2f}%)\n\n"
                 f"AI 建议: {ai_decision.decision.value}\n"
                 f"理由: {ai_decision.reason}\n\n"
-                f"止损: {ai_decision.stop_loss:.4f if ai_decision.stop_loss > 0 else '未设置'}\n"
-                f"止盈: {ai_decision.take_profit:.4f if ai_decision.take_profit > 0 else '未设置'}",
+                f"止损: {stop_loss_val:.4f if stop_loss_val > 0 else '未设置'}\n"
+                f"止盈: {take_profit_val:.4f if take_profit_val > 0 else '未设置'}",
                 severity="HIGH" if ai_decision.decision == Decision.CLOSE else "MEDIUM",
             )
 
@@ -334,7 +338,7 @@ class TradingBot:
             else:
                 self._logger.info("AI 建议继续持仓，退出时保持当前仓位")
                 # 可以选择设置止损止盈订单（如果交易所支持）
-                if ai_decision.stop_loss > 0 or ai_decision.take_profit > 0:
+                if stop_loss_val > 0 or take_profit_val > 0:
                     self._logger.info("建议手动设置止损止盈订单以控制风险")
 
         except Exception as e:
