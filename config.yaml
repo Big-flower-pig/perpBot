@@ -26,7 +26,9 @@ trading:
   margin_mode: isolated # 仓位模式: cross(全仓) / isolated(逐仓)
   test_mode: false # 测试模式（仅分析不下单）
   data_points: 96 # 获取K线数量
-  interval: 60 # 交易循环间隔（秒）
+  interval: 300 # 交易循环间隔（秒）- 5分钟分析一次
+  min_signal_strength: 3 # 最小信号强度（满足3条指标才开仓）
+  min_holding_periods: 4 # 最少持仓周期数（15m*4=1小时）
 
 # ==================== AI 配置 ====================
 ai:
@@ -42,10 +44,10 @@ ai:
 
 # ==================== 仓位管理 ====================
 position:
-  mode: compound # fixed(固定) / compound(复利)
+  mode: compound # fixed(固定) / compound(复利) - 复利模式自动调整仓位
   initial_capital: 100 # 初始本金 (USDT)
-  base_usdt_amount: 100 # 固定模式基础金额
-  fixed_contracts: 0.1 # 固定仓位模式下的合约张数
+  base_usdt_amount: 100 # 固定模式：每次开仓金额 (USDT)
+  fixed_contracts: 0 # 固定合约张数（0表示使用base_usdt_amount计算）
   max_position_ratio: 1.0 # 最大仓位比例
   # 信心程度倍数（用于调整仓位）
   confidence_multipliers:
@@ -57,13 +59,13 @@ position:
 # ==================== 风险管理 ====================
 risk:
   # 止损止盈
-  stop_loss_percent: 3.0 # 止损百分比
-  take_profit_percent: 5.0 # 止盈百分比
-  trailing_stop_percent: 2.0 # 移动止盈回撤百分比
+  stop_loss_percent: 2.0 # 止损百分比（收紧）
+  take_profit_percent: 4.0 # 止盈百分比
+  trailing_stop_percent: 1.5 # 移动止盈回撤百分比
 
   # 限额控制
   max_daily_loss: 10.0 # 日内最大亏损百分比
-  max_trades_per_day: 20 # 每日最大交易次数
+  max_trades_per_day: 20 # 每日最大交易次数（减少）
   max_position_value: 1000 # 最大持仓价值 (USDT)
 
   # 风险评估
@@ -73,23 +75,27 @@ risk:
   # 跳过低信心信号
   skip_low_confidence: true
 
+  # 交易冷却（防止频繁开平仓）
+  trade_cooldown_seconds: 600 # 同方向交易冷却时间（10分钟）
+  position_cooldown_seconds: 1800 # 平仓后重新开仓冷却（30分钟）
+
 # ==================== 监控配置 ====================
 monitoring:
   enabled: true
-  check_interval: 10 # 检查间隔（秒）
+  check_interval: 60 # 检查间隔（秒）- 降低监控频率
 
-  # 价格监控
-  price_change_threshold: 1.0 # 价格变化阈值 (%)
-  rapid_change_threshold: 2.0 # 价格急变阈值 (%)
+  # 价格监控 (调整阈值减少误报)
+  price_change_threshold: 4.0 # 价格变化阈值 (%) - 提高到4%减少频繁警报
+  rapid_change_threshold: 6.0 # 价格急变阈值 (%) - 提高到6%避免噪音
 
   # 成交量监控
-  volume_spike_threshold: 3.0 # 成交量异常倍数
+  volume_spike_threshold: 4.0 # 成交量异常倍数
 
   # 突破监控
   breakout_check: true
 
   # 冷却时间
-  cooldown_seconds: 60 # 异常触发后冷却时间
+  cooldown_seconds: 600 # 异常触发后冷却时间 (10分钟)
 
 # ==================== 通知配置 ====================
 notification:

@@ -350,6 +350,8 @@ class StrategyEngine:
 
         根据ADX和ATR判断当前市场处于趋势还是震荡状态。
 
+        优化版: ADX 是主要判断标准，ATR 作为辅助确认
+
         Args:
             indicators: 技术指标
 
@@ -358,13 +360,20 @@ class StrategyEngine:
         """
         adx = indicators.adx
         atr_pct = indicators.atr_percent
+        plus_di = indicators.plus_di
+        minus_di = indicators.minus_di
 
-        # ADX > 25 且 ATR% > 1%: 明显趋势
-        if adx > 25 and atr_pct > 1.0:
+        # ADX > 30: 明显趋势 (降低阈值，ADX > 30 已足够强)
+        # 不再要求 ATR% > 1%，因为加密货币 ATR 通常较低
+        if adx > 30:
             return "TRENDING"
 
-        # ADX < 20 且 ATR% < 0.5%: 明显震荡
-        if adx < 20 and atr_pct < 0.5:
+        # ADX > 20 且 DI 方向明确: 趋势形成中
+        if adx > 20 and abs(plus_di - minus_di) > 10:
+            return "TRENDING"
+
+        # ADX < 15: 明显震荡
+        if adx < 15:
             return "RANGING"
 
         # 其他情况: 过渡状态
@@ -701,9 +710,14 @@ class StrategyEngine:
         trend: TrendAnalysis,
         current_price: float,
     ) -> Tuple[Signal, str, Confidence]:
-        """过渡状态策略
+        """过渡状态策略 (优化版: 更积极的信号生成)
 
-        在趋势不明确时，保守观望或轻仓试探。
+        在趋势形成过程中，结合多种指标寻找入场机会。
+
+        改进点:
+        1. 放宽 RSI 阈值，从 25/75 调整为 35/65
+        2. 结合 MACD 和布林带确认信号
+        3. 考虑短期趋势方向
 
         Args:
             indicators: 技术指标
@@ -717,17 +731,84 @@ class StrategyEngine:
         reason = ""
         confidence = Confidence.LOW
 
-        # 等待明确信号
-        # 只有在极端情况下才入场
-        if indicators.rsi < 25:
+        rsi = indicators.rsi
+        bb_pos = indicators.bb_position
+        macd_hist = indicators.macd_histogram
+
+        # 多头信号条件 (放宽条件)
+        bullish_signals = 0
+        bullish_reasons = []
+
+        if rsi < 40:  # 放宽: RSI < 40 视为偏低
+            bullish_signals += 1
+            if rsi < 30:
+                bullish_reasons.append(f"RSI超卖({rsi:.0f})")
+            else:
+                bullish_reasons.append(f"RSI偏低({rsi:.0f})")
+
+        if bb_pos < 0.35:  # 放宽: 布林带下轨区域
+            bullish_signals += 1
+            bullish_reasons.append(f"BB下轨区({bb_pos:.0%})")
+
+        if macd_hist > 0:  # MACD 柱状图正值
+            bullish_signals += 1
+            bullish_reasons.append("MACD转正")
+        elif indicators.macd > indicators.macd_signal:
+            bullish_signals += 0.5
+            bullish_reasons.append("MACD金叉形成")
+
+        # 空头信号条件 (放宽条件)
+        bearish_signals = 0
+        bearish_reasons = []
+
+        if rsi > 60:  # 放宽: RSI > 60 视为偏高
+            bearish_signals += 1
+            if rsi > 70:
+                bearish_reasons.append(f"RSI超买({rsi:.0f})")
+            else:
+                bearish_reasons.append(f"RSI偏高({rsi:.0f})")
+
+        if bb_pos > 0.65:  # 放宽: 布林带上轨区域
+            bearish_signals += 1
+            bearish_reasons.append(f"BB上轨区({bb_pos:.0%})")
+
+        if macd_hist < 0:  # MACD 柱状图负值
+            bearish_signals += 1
+            bearish_reasons.append("MACD转负")
+        elif indicators.macd < indicators.macd_signal:
+            bearish_signals += 0.5
+            bearish_reasons.append("MACD死叉形成")
+
+        # 结合趋势方向确认
+        trend_boost = 0
+        if trend.overall in [Trend.STRONG_UP, Trend.WEAK_UP]:
+            trend_boost = 1
+        elif trend.overall in [Trend.STRONG_DOWN, Trend.WEAK_DOWN]:
+            trend_boost = -1
+
+        # 生成信号
+        final_bullish = bullish_signals + (trend_boost * 0.5 if trend_boost > 0 else 0)
+        final_bearish = bearish_signals + (
+            abs(trend_boost) * 0.5 if trend_boost < 0 else 0
+        )
+
+        if final_bullish >= 2:
             signal = Signal.BUY
-            reason = "极端超卖，可能反弹"
-        elif indicators.rsi > 75:
+            reason = ", ".join(bullish_reasons[:2])
+            if final_bullish >= 3:
+                confidence = Confidence.MEDIUM
+            else:
+                confidence = Confidence.LOW
+        elif final_bearish >= 2:
             signal = Signal.SELL
-            reason = "极端超买，可能回调"
+            reason = ", ".join(bearish_reasons[:2])
+            if final_bearish >= 3:
+                confidence = Confidence.MEDIUM
+            else:
+                confidence = Confidence.LOW
         else:
             signal = Signal.HOLD
-            reason = "市场方向不明，等待确认"
+            reason = f"信号不明确 (多:{bullish_signals:.1f}/空:{bearish_signals:.1f})"
 
         return signal, reason, confidence
 

@@ -208,6 +208,9 @@ class ExchangeManager:
         self._logger = get_logger("exchange")
         self._reconnect_attempts = 0
         self._max_reconnect_attempts = 5
+        self._position_mode: Optional[str] = (
+            None  # 持仓模式: long_short_mode / net_mode
+        )
         self._initialized = True
 
     @property
@@ -440,6 +443,9 @@ class ExchangeManager:
             leverage = get_config("trading.leverage")
             margin_mode = get_config("trading.margin_mode")
 
+            # 检测账户持仓模式
+            self._detect_position_mode()
+
             # 仅设置杠杆，其他参数使用默认值或已有设置
             # 持仓模式和保证金模式通常在账户级别已设置，无需每次修改
             leverage_set = self._set_leverage_via_native_api(
@@ -451,6 +457,31 @@ class ExchangeManager:
 
         except Exception as e:
             self._logger.error(f"设置交易参数失败: {e}")
+
+    def _detect_position_mode(self):
+        """检测账户持仓模式
+
+        OKX 有两种持仓模式:
+        - long_short_mode: 双向持仓，需要 posSide 参数
+        - net_mode: 单向持仓，不需要 posSide 参数
+        """
+        try:
+            # 获取账户配置
+            response = self._exchange.private_get_account_config()
+
+            if response.get("code") == "0":
+                data = response.get("data", [])
+                if data:
+                    self._position_mode = data[0].get("posMode", "net_mode")
+                    self._logger.info(f"[OK] 账户持仓模式: {self._position_mode}")
+                    return
+
+            self._position_mode = "net_mode"  # 默认单向持仓
+            self._logger.info(f"[OK] 使用默认持仓模式: {self._position_mode}")
+
+        except Exception as e:
+            self._position_mode = "net_mode"  # 默认单向持仓
+            self._logger.warning(f"检测持仓模式失败，使用默认单向模式: {e}")
 
     def _set_leverage_via_native_api(
         self, symbol: str, leverage: int, margin_mode: str
@@ -978,18 +1009,48 @@ class ExchangeManager:
             "sz": str(size),  # 数量
         }
 
-        # 逐仓模式需要指定持仓方向
-        if params.get("tdMode") == "isolated":
+        # 根据持仓模式决定是否需要 posSide 参数
+        # long_short_mode: 双向持仓，需要 posSide
+        # net_mode: 单向持仓，不需要 posSide
+        if self._position_mode == "long_short_mode":
+            # 双向持仓模式：需要指定持仓方向
             order_params["posSide"] = params.get(
                 "posSide", "long" if side == "buy" else "short"
             )
+        # 单向持仓模式不需要 posSide 参数
+
+        self._logger.debug(
+            f"下单参数: instId={inst_id}, side={side}, sz={size}, "
+            f"tdMode={order_params.get('tdMode')}, posMode={self._position_mode}"
+        )
 
         # 调用 OKX 下单 API
         response = self._exchange.private_post_trade_order(order_params)
 
         if response.get("code") != "0":
             error_msg = response.get("msg", "Unknown error")
-            raise OrderError(f"下单失败: {error_msg}")
+            # 检查是否是 posSide 错误，尝试切换模式重试
+            error_data = response.get("data", [])
+            if error_data:
+                s_code = error_data[0].get("sCode", "")
+                if s_code == "51000":
+                    # posSide 错误，可能持仓模式判断有误，尝试不传 posSide
+                    self._logger.warning("posSide 参数错误，尝试不使用 posSide 参数")
+                    if "posSide" in order_params:
+                        del order_params["posSide"]
+                        self._position_mode = "net_mode"  # 更新模式
+                        response = self._exchange.private_post_trade_order(order_params)
+                        if response.get("code") == "0":
+                            self._logger.info("[OK] 下单成功（使用单向持仓模式）")
+                        else:
+                            error_msg = response.get("msg", "Unknown error")
+                            raise OrderError(f"下单失败: {error_msg}")
+                    else:
+                        raise OrderError(f"下单失败: {error_msg}")
+                else:
+                    raise OrderError(f"下单失败: {error_msg}")
+            else:
+                raise OrderError(f"下单失败: {error_msg}")
 
         data = response.get("data", [])
         if not data:
@@ -1058,6 +1119,20 @@ class ExchangeManager:
     def min_amount(self) -> float:
         """获取最小交易量"""
         return self._market_info.get("min_amount", 0.01)
+
+    def set_leverage(self, leverage: int, symbol: str = None) -> bool:
+        """设置杠杆倍数
+
+        Args:
+            leverage: 杠杆倍数
+            symbol: 交易对，None 则使用配置中的
+
+        Returns:
+            是否设置成功
+        """
+        symbol = symbol or get_config("trading.symbol")
+        margin_mode = get_config("trading.margin_mode")
+        return self._set_leverage_via_native_api(symbol, leverage, margin_mode)
 
     def disconnect(self):
         """断开连接"""

@@ -72,6 +72,11 @@ class TradingBot:
         self._loop_count = 0
         self._trade_count = 0
 
+        # 交易冷却控制
+        self._last_trade_time: Optional[datetime] = None  # 最后一次交易时间
+        self._last_close_time: Optional[datetime] = None  # 最后一次平仓时间
+        self._last_trade_side: Optional[str] = None  # 最后一次交易方向
+
     def initialize(self) -> bool:
         """初始化所有模块
 
@@ -507,7 +512,11 @@ class TradingBot:
 
         # 5. 执行交易
         if ai_decision.is_actionable:
-            self._execute_decision(ai_decision, current_price, position)
+            # 检查交易冷却
+            if self._check_trade_cooldown(ai_decision.decision.value, position):
+                self._logger.info("交易冷却中，跳过本次操作")
+            else:
+                self._execute_decision(ai_decision, current_price, position)
         else:
             self._logger.debug("AI 建议观望，暂不操作")
 
@@ -565,6 +574,44 @@ class TradingBot:
                     f"[模拟] 开仓: {ai_decision.decision.value} {size} @ {current_price}"
                 )
 
+    def _check_trade_cooldown(self, decision: str, position) -> bool:
+        """检查交易冷却时间
+
+        Args:
+            decision: 决策类型 (BUY/SELL/CLOSE/HOLD)
+            position: 当前持仓
+
+        Returns:
+            True 表示冷却中，应跳过交易；False 表示可以交易
+        """
+        now = datetime.now()
+
+        # 获取冷却配置
+        risk_config = get_config("risk", {})
+        trade_cooldown = risk_config.get("trade_cooldown_seconds", 600)  # 默认10分钟
+        position_cooldown = risk_config.get(
+            "position_cooldown_seconds", 1800
+        )  # 默认30分钟
+
+        # 平仓后冷却检查
+        if decision in ["BUY", "SELL"] and self._last_close_time:
+            elapsed = (now - self._last_close_time).total_seconds()
+            if elapsed < position_cooldown:
+                remaining = int(position_cooldown - elapsed)
+                self._logger.info(f"平仓后冷却中，还需等待 {remaining} 秒才能开新仓")
+                return True
+
+        # 同方向交易冷却检查
+        if decision in ["BUY", "SELL"]:
+            if self._last_trade_time and self._last_trade_side == decision:
+                elapsed = (now - self._last_trade_time).total_seconds()
+                if elapsed < trade_cooldown:
+                    remaining = int(trade_cooldown - elapsed)
+                    self._logger.info(f"{decision} 方向冷却中，还需等待 {remaining} 秒")
+                    return True
+
+        return False
+
     def _execute_open(
         self,
         side: str,
@@ -597,11 +644,13 @@ class TradingBot:
             result = self._exchange.create_market_order(
                 symbol=symbol,
                 side=side,
-                amount=size,
+                size=size,
             )
 
             if result.success:
                 self._trade_count += 1
+                self._last_trade_time = datetime.now()
+                self._last_trade_side = side.upper()
                 self._logger.info(f"开仓成功: 订单ID {result.order_id}")
 
                 # 发送通知
@@ -640,6 +689,8 @@ class TradingBot:
 
             if result.success:
                 self._trade_count += 1
+                self._last_trade_time = datetime.now()
+                self._last_close_time = datetime.now()  # 记录平仓时间
                 self._logger.info(f"平仓成功: 订单ID {result.order_id}")
 
                 # 更新本金追踪
