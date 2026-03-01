@@ -3,11 +3,12 @@ PerpBot 风险管理模块
 
 提供完善的风险管理功能：
 - 止损止盈计算
-- 仓位大小计算
+- 仓位大小计算 (含凯利公式)
 - 最大回撤控制
 - VaR 计算
 - 交易频率限制
 - 日内亏损限制
+- 夏普比率计算
 """
 
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 import math
 import threading
+import statistics
 
 from utils.logger import get_logger, TradingLogger
 from utils.config import get_config
@@ -24,6 +26,7 @@ from utils.helpers import safe_float, calculate_pnl, calculate_liquidation_price
 
 class RiskLevel(Enum):
     """风险等级"""
+
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
@@ -32,8 +35,9 @@ class RiskLevel(Enum):
 
 class RiskAction(Enum):
     """风险动作"""
+
     ALLOW = "ALLOW"  # 允许交易
-    WARN = "WARN"    # 警告但允许
+    WARN = "WARN"  # 警告但允许
     REDUCE = "REDUCE"  # 减少仓位
     BLOCK = "BLOCK"  # 阻止交易
 
@@ -41,6 +45,7 @@ class RiskAction(Enum):
 @dataclass
 class RiskAssessment:
     """风险评估结果"""
+
     action: RiskAction
     level: RiskLevel
     reason: str
@@ -48,10 +53,21 @@ class RiskAssessment:
     warnings: List[str] = field(default_factory=list)
     details: Dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def approved(self) -> bool:
+        """交易是否被批准"""
+        return self.action in [RiskAction.ALLOW, RiskAction.WARN]
+
+    @property
+    def message(self) -> str:
+        """风险消息（兼容旧代码）"""
+        return self.reason
+
 
 @dataclass
 class DailyStats:
     """日内统计"""
+
     date: date
     trades: int = 0
     pnl: float = 0.0
@@ -59,6 +75,22 @@ class DailyStats:
     losses: int = 0
     max_drawdown: float = 0.0
     peak_capital: float = 0.0
+
+
+@dataclass
+class PerformanceMetrics:
+    """性能指标"""
+
+    total_trades: int = 0
+    win_trades: int = 0
+    loss_trades: int = 0
+    win_rate: float = 0.0
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
+    profit_factor: float = 0.0
+    sharpe_ratio: float = 0.0
+    max_drawdown: float = 0.0
+    kelly_fraction: float = 0.0  # 凯利比例
 
 
 class RiskManager:
@@ -100,29 +132,41 @@ class RiskManager:
 
     def assess_trade(
         self,
-        signal: str,
-        confidence: str,
+        signal: str = None,
+        confidence: str = "MEDIUM",
         position: Optional[Dict] = None,
         capital: float = 0,
         current_price: float = 0,
+        symbol: str = None,
+        side: str = None,
     ) -> RiskAssessment:
         """评估交易风险
 
         Args:
-            signal: 交易信号 (BUY/SELL/HOLD)
+            signal: 交易信号 (BUY/SELL/HOLD) - 兼容旧参数
             confidence: 信心程度 (HIGH/MEDIUM/LOW)
             position: 当前持仓
             capital: 当前资金
             current_price: 当前价格
+            symbol: 交易对 - 新参数
+            side: 交易方向 (long/short) - 新参数
 
         Returns:
             RiskAssessment 对象
         """
+        # 兼容新旧参数：如果传入了 side，则转换为 signal
+        if signal is None and side is not None:
+            signal = "BUY" if side == "long" else "SELL"
+
         warnings = []
         details = {}
 
-        # HOLD 信号直接允许
-        if signal == "HOLD":
+        # 记录交易对信息
+        if symbol:
+            details["symbol"] = symbol
+
+        # HOLD 信号或无信号直接允许
+        if signal is None or signal == "HOLD":
             return RiskAssessment(
                 action=RiskAction.ALLOW,
                 level=RiskLevel.LOW,
@@ -212,16 +256,22 @@ class RiskManager:
             action = RiskAction.ALLOW
 
         # 记录风险评估日志
-        self._logger.risk(
-            event="TRADE_ASSESSMENT",
-            level=level.value,
-            details={
-                "signal": signal,
-                "confidence": confidence,
-                "action": action.value,
-                "warnings": warnings,
-            },
-        )
+        if hasattr(self._logger, "risk"):
+            self._logger.risk(
+                event="TRADE_ASSESSMENT",
+                level=level.value,
+                details={
+                    "signal": signal,
+                    "confidence": confidence,
+                    "action": action.value,
+                    "warnings": warnings,
+                },
+            )
+        else:
+            self._logger.info(
+                f"[RISK] TRADE_ASSESSMENT - level={level.value}, "
+                f"signal={signal}, action={action.value}"
+            )
 
         return RiskAssessment(
             action=action,
@@ -239,8 +289,14 @@ class RiskManager:
         confidence: str = "MEDIUM",
         leverage: int = None,
         contract_size: float = 1.0,
+        use_kelly: bool = True,
     ) -> float:
-        """计算仓位大小
+        """计算仓位大小 (优化版: 支持凯利公式)
+
+        核心改进:
+        1. 基于历史表现计算凯利比例
+        2. 使用半凯利以降低风险
+        3. 结合信心程度调整
 
         Args:
             capital: 本金
@@ -248,6 +304,7 @@ class RiskManager:
             confidence: 信心程度
             leverage: 杠杆倍数
             contract_size: 合约乘数
+            use_kelly: 是否使用凯利公式
 
         Returns:
             建议仓位大小（合约张数）
@@ -266,12 +323,26 @@ class RiskManager:
         else:
             base_capital = position_config.get("base_usdt_amount", capital)
 
-        # 信心倍数
+        # ===== 核心改进: 凯利公式计算 =====
+        kelly_fraction = 0.25  # 默认使用25%仓位
+
+        if use_kelly and len(self._trade_history) >= 10:
+            # 有足够历史数据时，计算凯利比例
+            kelly_fraction = self._calculate_kelly_fraction()
+
+        # 信心倍数调整
         confidence_multipliers = position_config.get("confidence_multipliers", {})
-        multiplier = confidence_multipliers.get(confidence.lower(), 1.0)
+        confidence_mult = confidence_multipliers.get(confidence.lower(), 1.0)
+
+        # 综合调整后的仓位比例
+        position_fraction = kelly_fraction * confidence_mult
+
+        # 最大仓位限制 (不超过50%)
+        max_fraction = position_config.get("max_position_ratio", 0.5)
+        position_fraction = min(position_fraction, max_fraction)
 
         # 计算调整后的本金
-        adjusted_capital = base_capital * multiplier
+        adjusted_capital = base_capital * position_fraction
 
         # 确保不超过实际资金
         adjusted_capital = min(adjusted_capital, capital)
@@ -289,11 +360,192 @@ class RiskManager:
             size = min_amount
 
         self._logger.debug(
-            f"仓位计算: 本金={adjusted_capital:.2f}, 杠杆={leverage}x, "
-            f"价格={price:.4f}, 合约乘数={contract_size}, 结果={size}张"
+            f"仓位计算: 本金={adjusted_capital:.2f}, 凯利比例={kelly_fraction:.1%}, "
+            f"信心倍数={confidence_mult}, 杠杆={leverage}x, 结果={size}张"
         )
 
         return size
+
+    def _calculate_kelly_fraction(
+        self,
+        max_fraction: float = 0.5,
+        use_half_kelly: bool = True,
+    ) -> float:
+        """计算凯利公式比例
+
+        凯利公式: f* = p - (1-p) / (b)
+        其中:
+        - p = 胜率
+        - b = 平均盈利 / 平均亏损 (盈亏比)
+
+        Args:
+            max_fraction: 最大仓位比例
+            use_half_kelly: 是否使用半凯利 (更保守)
+
+        Returns:
+            凯利比例 (0 ~ max_fraction)
+        """
+        if len(self._trade_history) < 10:
+            # 历史数据不足，使用默认值
+            return 0.25
+
+        # 计算胜率和盈亏比
+        pnls = [t.get("pnl", 0) for t in self._trade_history]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+
+        if not wins or not losses:
+            return 0.25
+
+        # 胜率
+        win_rate = len(wins) / len(pnls)
+
+        # 盈亏比
+        avg_win = sum(wins) / len(wins)
+        avg_loss = abs(sum(losses) / len(losses))
+
+        if avg_loss == 0:
+            return max_fraction
+
+        win_loss_ratio = avg_win / avg_loss
+
+        # 凯利公式
+        kelly = win_rate - (1 - win_rate) / win_loss_ratio
+
+        # 凯利值可能为负，表示不应该下注
+        if kelly <= 0:
+            return 0.1  # 最小仓位
+
+        # 使用半凯利以降低风险
+        if use_half_kelly:
+            kelly = kelly * 0.5
+
+        # 限制最大比例
+        kelly = min(kelly, max_fraction)
+
+        self._logger.debug(
+            f"凯利计算: 胜率={win_rate:.1%}, 盈亏比={win_loss_ratio:.2f}, "
+            f"凯利={kelly:.1%}"
+        )
+
+        return kelly
+
+    def get_performance_metrics(self) -> PerformanceMetrics:
+        """获取性能指标 (优化版)
+
+        Returns:
+            PerformanceMetrics 对象
+        """
+        if not self._trade_history:
+            return PerformanceMetrics()
+
+        trades = self._trade_history
+        pnls = [t.get("pnl", 0) for t in trades]
+
+        total_trades = len(trades)
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+
+        total_pnl = sum(pnls)
+        avg_win = sum(wins) / len(wins) if wins else 0
+        avg_loss = abs(sum(losses) / len(losses)) if losses else 0
+
+        win_rate = len(wins) / total_trades * 100 if total_trades > 0 else 0
+        profit_factor = (
+            abs(sum(wins) / sum(losses))
+            if losses and sum(losses) != 0
+            else float("inf")
+        )
+
+        # 计算夏普比率
+        if len(pnls) > 1:
+            avg_pnl = statistics.mean(pnls)
+            std_pnl = statistics.stdev(pnls)
+            sharpe = (avg_pnl / std_pnl * (252**0.5)) if std_pnl > 0 else 0
+        else:
+            sharpe = 0
+
+        # 计算最大回撤
+        cumulative = []
+        running_sum = 0
+        for pnl in pnls:
+            running_sum += pnl
+            cumulative.append(running_sum)
+
+        max_dd = 0
+        peak = 0
+        for val in cumulative:
+            if val > peak:
+                peak = val
+            dd = (peak - val) / peak if peak > 0 else 0
+            max_dd = max(max_dd, dd)
+
+        # 计算凯利比例
+        kelly = self._calculate_kelly_fraction()
+
+        return PerformanceMetrics(
+            total_trades=total_trades,
+            win_trades=len(wins),
+            loss_trades=len(losses),
+            win_rate=win_rate,
+            avg_win=avg_win,
+            avg_loss=avg_loss,
+            profit_factor=profit_factor,
+            sharpe_ratio=sharpe,
+            max_drawdown=max_dd * 100,
+            kelly_fraction=kelly,
+        )
+
+    def calculate_var(
+        self,
+        capital: float,
+        confidence_level: float = 0.95,
+        holding_period_days: int = 1,
+    ) -> Dict[str, float]:
+        """计算 VaR (风险价值)
+
+        使用历史模拟法计算 VaR，估计在给定置信水平下的最大可能损失。
+
+        Args:
+            capital: 当前资金
+            confidence_level: 置信水平 (0.95 = 95%)
+            holding_period_days: 持有期 (天)
+
+        Returns:
+            包含 VaR 信息的字典
+        """
+        if len(self._trade_history) < 20:
+            # 历史数据不足
+            return {
+                "var": 0,
+                "var_percent": 0,
+                "confidence_level": confidence_level,
+                "method": "insufficient_data",
+            }
+
+        # 获取历史收益率
+        pnls = [t.get("pnl", 0) for t in self._trade_history]
+
+        # 计算收益率 (假设每笔交易使用相同本金)
+        if capital <= 0:
+            return {"var": 0, "var_percent": 0}
+
+        # 使用百分位数计算 VaR
+        var_threshold = statistics.quantiles(pnls, n=100)[
+            int((1 - confidence_level) * 100)
+        ]
+
+        # 调整持有期 (按平方根法则)
+        var_adjusted = abs(var_threshold) * (holding_period_days**0.5)
+        var_percent = (var_adjusted / capital) * 100
+
+        return {
+            "var": var_adjusted,
+            "var_percent": var_percent,
+            "confidence_level": confidence_level,
+            "holding_period_days": holding_period_days,
+            "method": "historical_simulation",
+        }
 
     def calculate_stop_loss_take_profit(
         self,
@@ -327,22 +579,33 @@ class RiskManager:
 
     def check_position_risk(
         self,
-        position: Dict,
+        position,  # 支持 Dict 或 Position dataclass
         current_price: float,
     ) -> RiskAssessment:
         """检查持仓风险
 
         Args:
-            position: 持仓信息
+            position: 持仓信息（字典或 Position dataclass）
             current_price: 当前价格
 
         Returns:
             RiskAssessment 对象
         """
-        entry_price = position.get("entry_price", 0)
-        side = position.get("side", "long")
-        unrealized_pnl = position.get("unrealized_pnl", 0)
-        size = position.get("size", 0)
+        # 支持 dataclass 和字典两种类型
+        if hasattr(position, "entry_price"):
+            # Position dataclass
+            entry_price = position.entry_price
+            side = position.side
+            unrealized_pnl = position.unrealized_pnl
+            size = position.size
+            leverage = getattr(position, "leverage", 10)
+        else:
+            # Dict
+            entry_price = position.get("entry_price", 0)
+            side = position.get("side", "long")
+            unrealized_pnl = position.get("unrealized_pnl", 0)
+            size = position.get("size", 0)
+            leverage = position.get("leverage", 10)
 
         if entry_price <= 0:
             return RiskAssessment(
@@ -389,8 +652,7 @@ class RiskManager:
             level = RiskLevel.CRITICAL
             warnings.append(f"触发最大回撤限制: {abs(pnl_pct):.2f}%")
 
-        # 检查强平风险
-        leverage = position.get("leverage", 10)
+        # 检查强平风险（leverage 已在上面提取）
         liquidation_price = calculate_liquidation_price(entry_price, leverage, side)
         price_distance = abs(current_price - liquidation_price) / current_price * 100
 
@@ -477,47 +739,33 @@ class RiskManager:
         day = day or date.today()
         return self._daily_stats.get(day, DailyStats(date=day))
 
-    def get_performance_metrics(self) -> Dict[str, Any]:
-        """获取性能指标"""
-        if not self._trade_history:
-            return {}
-
-        trades = self._trade_history
-        pnls = [t.get("pnl", 0) for t in trades]
-
-        total_trades = len(trades)
-        wins = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p < 0]
-
-        total_pnl = sum(pnls)
-        avg_win = sum(wins) / len(wins) if wins else 0
-        avg_loss = sum(losses) / len(losses) if losses else 0
-
-        win_rate = len(wins) / total_trades * 100 if total_trades > 0 else 0
-        profit_factor = abs(sum(wins) / sum(losses)) if losses and sum(losses) != 0 else float("inf")
-
-        # 计算夏普比率
-        if len(pnls) > 1:
-            import statistics
-            avg_pnl = statistics.mean(pnls)
-            std_pnl = statistics.stdev(pnls)
-            sharpe = (avg_pnl / std_pnl * (252 ** 0.5)) if std_pnl > 0 else 0
-        else:
-            sharpe = 0
-
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """获取性能摘要 (用于日志和报告)"""
+        metrics = self.get_performance_metrics()
         return {
-            "total_trades": total_trades,
-            "win_trades": len(wins),
-            "loss_trades": len(losses),
-            "win_rate": win_rate,
-            "total_pnl": total_pnl,
-            "avg_win": avg_win,
-            "avg_loss": avg_loss,
-            "profit_factor": profit_factor,
-            "sharpe_ratio": sharpe,
+            "total_trades": metrics.total_trades,
+            "win_rate": f"{metrics.win_rate:.1f}%",
+            "profit_factor": f"{metrics.profit_factor:.2f}",
+            "sharpe_ratio": f"{metrics.sharpe_ratio:.2f}",
+            "max_drawdown": f"{metrics.max_drawdown:.1f}%",
+            "kelly_fraction": f"{metrics.kelly_fraction:.1%}",
+            "avg_win": f"${metrics.avg_win:.2f}",
+            "avg_loss": f"${metrics.avg_loss:.2f}",
         }
 
     def reset_daily_stats(self):
         """重置日内统计"""
         today = date.today()
         self._daily_stats[today] = DailyStats(date=today)
+
+
+# Global risk manager instance
+_risk_manager: Optional[RiskManager] = None
+
+
+def get_risk_manager() -> RiskManager:
+    """Get global risk manager instance"""
+    global _risk_manager
+    if _risk_manager is None:
+        _risk_manager = RiskManager()
+    return _risk_manager
